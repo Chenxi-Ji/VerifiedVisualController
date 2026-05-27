@@ -5,6 +5,8 @@ This repository contains two script groups:
 - `scripts_control/`: PyTorch training/testing utilities for the vision controller and Lyapunov model.
 - `scripts_tflite/`: Export, validation, and rollout scripts for the fused TFLite model.
 
+
+
 ## scripts_control
 
 ### `scripts_control/render_image.py`
@@ -132,12 +134,42 @@ Run:
 python3 scripts_tflite/test_ctrl_lya_tflite.py
 ```
 
+## Python Environment And Dependencies
+
+Recommended Python version:
+
+- Python 3.10 or 3.11
+
+Install core dependencies (training/testing with PyTorch + gsplat):
+
+```bash
+python3 -m pip install numpy scipy matplotlib tqdm opencv-python torch gsplat
+```
+
+Install TFLite inference dependencies (for `scripts_tflite/test_ctrl_lya_tflite.py` and `scripts_tflite/debug_pt_vs_tflite.py`):
+
+```bash
+python3 -m pip install tensorflow tflite-runtime
+```
+
+Install export dependencies (for `scripts_tflite/export_to_tflite.py`):
+
+```bash
+python3 -m pip install onnx onnx2tf tensorflow
+```
+
+System dependency for video writing:
+
+- `ffmpeg` (required by `matplotlib.animation.FFMpegWriter`)
+
 ## Notes
 
 - `__pycache__/` directories are auto-generated and are not part of the main code logic.
 - Most scripts assume existing assets under `nerfstudio/outputs/...` and `weights/`.
 
 ## Project Structure
+
+**# To run scripts in this repo, please download scene data from https://drive.google.com/drive/folders/1koY1TL30Bty2x0U6VpszKRgMXk61oTkG?usp=drive_link and put it aligned with the project tree diagram at the end of this readme file.**
 
 ```text
 VerifiedVisualControllerTF/
