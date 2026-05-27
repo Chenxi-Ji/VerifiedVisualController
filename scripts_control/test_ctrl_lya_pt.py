@@ -10,8 +10,8 @@ import cv2
 from matplotlib.animation import FFMpegWriter
 import io
 
-from render_image import render,  load_gsplat_scene
-from utils_ctrl_lya_pt import Controller, Lyapunov
+from render_image import render, render_batch, load_gsplat_scene
+from utils_ctrl_lya_pt import Controller, Lyapunov, transform_drone_velocity_to_world_frame
 
 # =============================
 # CONFIG
@@ -24,8 +24,8 @@ class Config:
     H = 30
     sample_num = 5
 
-    target_pose = np.array([0.0, -4.0, 0.0, 1.57, 0.0, 0.0])
-    gate_pose = np.array([0.0, -2.0, 0.0, 1.57, 0.0, 0.0])
+    target_pose = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
+    gate_pose = np.array([0.0, -2.0, -0.2, 1.57, 0.0, 0.0])
 
     # gsplat path
     gsplat_path = "nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825"
@@ -39,8 +39,8 @@ class Config:
 # =========================
 def sample_init_poses(target, n=10):
     return target + np.random.uniform(
-        low=[-1.5, -1.5, -0.7, -0.5, -0.3, -0.3],
-        high=[ 1.5,  1.5,  0.7,  0.5,  0.3,  0.3],
+        low=[-1.5, -1.2, -0.7, -0.5, -0.0, -0.0],
+        high=[ 1.5,  1.2,  0.7,  0.5,  0.0,  0.0],
         size=(n, 6)
     )
 
@@ -171,7 +171,10 @@ def run_test(ctrl, Vnet, scene, target, gate, render_fn,
                     # =========================
                     # control
                     # =========================
-                    pred = ctrl(img)
+                    pred_self = ctrl(img)
+                    pred= transform_drone_velocity_to_world_frame(pred_self)
+                    zeros = torch.zeros(*pred.shape[:-1], 2, device=pred.device, dtype=pred.dtype)
+                    pred = torch.cat([pred, zeros], dim=-1)
                     next_pose = pose + pred * dt
                     # print(next_pose)
 
@@ -181,7 +184,7 @@ def run_test(ctrl, Vnet, scene, target, gate, render_fn,
                     # Lyapunov
                     # =========================
                     V, _ = Vnet(pose, target_t.expand_as(pose))
-
+                    
                     # =========================
                     # record
                     # =========================

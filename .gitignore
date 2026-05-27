@@ -1,1 +1,3 @@
 nerfstudio/
+__pycache__/ 
+.claude/

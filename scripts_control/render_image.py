@@ -71,9 +71,10 @@ def get_viewmat(optimized_camera_to_world, device = torch.device("cuda" if torch
 # =============================
 # RENDER（优化版）
 # =============================
-def render(pose, scene, width = 320, height = 240,
-            fx = 273.42082456, fy = 273.789787305, 
-            cx = 174.591581635, cy = 107.77243002, 
+   
+def render(pose, scene, width = 300, height = 200,
+            fx = 113.258171, fy = 113.347599, 
+            cx = 158.868074, cy = 98.837772, 
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     means, quats, opacities, scales, colors, transform, scale = scene
 
@@ -121,12 +122,12 @@ def render(pose, scene, width = 320, height = 240,
 
     img = rgb[0, ..., :3].clamp(0, 1)
     return img.permute(2, 0, 1).to(device)
-
+    
 def render_batch(poses, scene,
-                 width=320, height=240,
-                 fx=273.42082456, fy=273.789787305,
-                 cx=174.591581635, cy=107.77243002,
-                 device=torch.device("cuda")):
+                 width=300, height=200,
+                 fx=113.258171, fy=113.347599,
+                 cx=158.868074, cy=98.837772,
+                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
 
     means, quats, opacities, scales, colors, transform, scale = scene
 
@@ -223,44 +224,43 @@ def render_batch(poses, scene,
     return imgs
 
 if __name__ == "__main__":
-    # cfg = Config()
-
-    # # 加载场景
-    # scene = load_gsplat_scene(cfg)
-
-    # # 随机生成一个pose
-    # # random_pose = np.array([0.0, -4.0, 0.0, 1.57, 0.0, 0.0])
-    # random_pose = np.array([0.5813743, -3.2629182,  -0.10773082,  1.9317428,  -0.04433344,  0.13023579])  # 可以修改为其他pose进行测试  
-    # # 渲染图像
-    # img = render(random_pose, scene, device=cfg.device)
-
-    # # 显示图像
-    # plt.imshow(img.permute(1, 2, 0).cpu().numpy())
-    # plt.axis('off')
-    # plt.show()
-
-    # os.makedirs("figures", exist_ok=True)
-    # plt.savefig("figures/example_image.png")
+    os.makedirs("figures", exist_ok=True)
+    test_batch = False
 
     cfg = Config()
     device = cfg.device
-
     scene = load_gsplat_scene(cfg)
 
-    poses = np.array([
-        [0.0, -4.0, 0.0, 1.57, 0.0, 0.0]
-    ])
+    if not test_batch:
+        
+        random_pose = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
+        # random_pose = np.array([0.5813743, -3.2629182,  -0.10773082,  1.9317428,  -0.04433344,  0.13023579])  # 可以修改为其他pose进行测试  
 
-    imgs = render_batch(poses, scene, device=device)
+        img = render(random_pose, scene, device=cfg.device)
 
-    print("imgs shape:", imgs.shape)  # (B,3,H,W)
+        # 显示图像
+        plt.imshow(img.permute(1, 2, 0).cpu().numpy())
+        plt.axis('off')
+        plt.savefig("figures/example_image.png")
+        plt.show()
 
-    # show first
-    img = imgs[0].permute(1,2,0).cpu().numpy()
+    else:
+        
 
-    plt.imshow(img)
-    plt.axis('off')
-    plt.show()
+        poses = np.array([
+            [0.0, -4.0, 0.0, 1.57, 0.0, 0.0]
+        ])
 
-    os.makedirs("figures", exist_ok=True)
-    plt.savefig("figures/example_image.png")
+        imgs = render_batch(poses, scene, device=device)
+        print("imgs shape:", imgs.shape)  # (B,3,H,W)
+
+        # show first
+        img = imgs[0].permute(1,2,0).cpu().numpy()
+
+        plt.imshow(img)
+        plt.axis('off')
+        plt.savefig("figures/example_image.png")
+        plt.show()
+
+    
+    
