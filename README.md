@@ -136,3 +136,34 @@ python3 scripts_tflite/test_ctrl_lya_tflite.py
 
 - `__pycache__/` directories are auto-generated and are not part of the main code logic.
 - Most scripts assume existing assets under `nerfstudio/outputs/...` and `weights/`.
+
+## Project Structure
+
+```text
+VerifiedVisualControllerTF/
+├── README.md
+├── figures/
+├── nerfstudio/
+│   └── outputs/
+│       └── uturn/
+│           └── splatfacto/2025-05-09_151825/
+│               ├── config.yml
+│               ├── dataparser_transforms.json
+│               └── nerfstudio_models/
+│                   ├── step-000039999.ckpt
+│                   └── step-000040005.ckpt
+├── scripts_control/
+│   ├── draw_lya_2d.py
+│   ├── render_image.py
+│   ├── test_ctrl_lya_pt.py
+│   ├── train_ctrl_lya_pt.py
+│   └── utils_ctrl_lya_pt.py
+├── scripts_tflite/
+│   ├── debug_pt_vs_tflite.py
+│   ├── export_to_tflite.py
+│   └── test_ctrl_lya_tflite.py
+├── videos/
+└── weights/
+	├── ctrl_lya.pt
+	└── ctrl_lya.tflite
+```
