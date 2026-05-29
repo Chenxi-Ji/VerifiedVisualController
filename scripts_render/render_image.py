@@ -253,7 +253,6 @@ if __name__ == "__main__":
         plt.axis('off')
         plt.savefig("figures/example_image.png")
         plt.show()
-
     else:
         
 
@@ -271,6 +270,6 @@ if __name__ == "__main__":
         plt.axis('off')
         plt.savefig("figures/example_image.png")
         plt.show()
+        
 
-    
     

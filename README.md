@@ -1,116 +1,246 @@
-# Scripts
+# Verified Visual Controller
 
-This folder contains scripts for running a verified visual controller using Gaussian Splatting (gsplat) scene rendering and TFLite neural network models.
+This repository contains a vision-based controller pipeline built on Gaussian Splatting rendering, a PyTorch controller/Lyapunov model, TFLite export/inference, and a certification workflow.
 
----
+## Project Tree
 
-## Files
-
-### `render_image.py`
-
-Handles loading and rendering from a pre-trained 3D Gaussian Splatting scene (nerfstudio splatfacto format).
-
-**Key functions:**
-
-- `load_gsplat_scene(cfg)` — Loads Gaussian parameters (means, quats, opacities, scales, colors) and the dataparser transform from a nerfstudio checkpoint.
-- `get_viewmat(optimized_camera_to_world)` — Converts a camera-to-world matrix into the gsplat world-to-camera viewmat format.
-- `render(pose, scene, ...)` — Renders a single image from a 6-DOF pose `[x, y, z, yaw, pitch, roll]`. Returns a `(3, H, W)` float32 tensor.
-- `render_batch(poses, scene, ...)` — Batched version of `render` for multiple poses at once. Returns `(B, 3, H, W)`.
-
-**Default camera intrinsics:** `320×240`, `fx=273.42`, `fy=273.79`, `cx=174.59`, `cy=107.77`.
-
----
-
-### `ctrl_lya_tf.py`
-
-Provides a modular single-step pipeline combining scene rendering, control prediction, and Lyapunov value estimation.
-
-**Config (`Config` dataclass):**
-
-| Field | Default | Description |
-|---|---|---|
-| `device` | `cuda` / `cpu` | Compute device |
-| `target_pose` | `[0, -4, 0, 1.57, 0, 0]` | Goal pose `[x, y, z, roll, pitch, yaw]` |
-| `gsplat_path` | `nerfstudio/outputs/uturn/...` | Path to the splatfacto output directory |
-| `checkpoint` | `step-000040005.ckpt` | Checkpoint filename inside `nerfstudio_models/` |
-| `controller_tflite` | `weights/ctrl.tflite` | Path to the controller TFLite model |
-| `lyapunov_tflite` | `weights/lya.tflite` | Path to the Lyapunov network TFLite model |
-
-**Key classes and functions:**
-
-- `TFLiteModel(path)` — Thin wrapper around `tf.lite.Interpreter`. Callable with NumPy arrays as inputs.
-- `generate_image(cur_pose, scene, device)` — Renders a `(1, H, W, 3)` image from a pose using the gsplat scene.
-- `compute_control_and_lyapunov(image, cur_pose, target_pose, ctrl_model, Vnet)` — Runs the controller on the image and the Lyapunov network on the current/target poses. Returns `(control, V)`.
-- `step(cur_pose, scene, ctrl_model, Vnet, target_pose, device)` — Full single-step pipeline: render → control + Lyapunov. Returns `(image, control, V)`.
-
-**Usage:**
-```bash
-python3 scripts/ctrl_lya_tf.py
+```text
+VerifiedVisualController/
+├── auto_LiRPA/
+├── backups/
+├── figures/
+├── nerfstudio/
+│   └── outputs/uturn/splatfacto/2025-05-09_151825/
+│       ├── config.yml
+│       ├── dataparser_transforms.json
+│       └── nerfstudio_models/
+│           └── step-000040005.ckpt
+├── results/
+├── scripts_cert/
+│   ├── certify_control.py
+│   └── plot.py
+├── scripts_control/
+│   ├── draw_lya_2d.py
+│   ├── render_image.py
+│   ├── test_ctrl_lya_pt.py
+│   ├── train_ctrl_lya_pt.py
+│   └── utils_ctrl_lya_pt.py
+├── scripts_render/
+│   ├── abstract_render_image.py
+│   ├── render_image.py
+│   ├── utils_abstract_render.py
+│   ├── utils_alpha_blending.py
+│   └── utils_rational_quad.py
+├── scripts_tflite/
+│   ├── debug_pt_vs_tflite.py
+│   ├── export_to_tflite.py
+│   └── test_ctrl_lya_tflite.py
+├── test_videos/
+├── videos/
+└── weights/
 ```
 
----
+## Scripts
 
-### `test_ctrl_lya_tf.py`
+### `scripts_control/render_image.py`
+Loads a nerfstudio Gaussian Splatting checkpoint and renders RGB images from 6-DoF poses. This module is used by the control and certification scripts.
 
-Runs closed-loop rollout tests, visualizes trajectories and Lyapunov values, and saves videos.
+Run: imported by other scripts; no standalone entry point.
 
-**Config (`Config` dataclass):**
+### `scripts_control/utils_ctrl_lya_pt.py`
+Defines the PyTorch controller network, the Lyapunov network, and pose/velocity frame transforms.
 
-| Field | Default | Description |
-|---|---|---|
-| `dt` | `0.1` | Integration timestep |
-| `H` | `30` | Rollout horizon (steps) |
-| `sample_num` | `5` | Number of random initial poses to test |
-| `target_pose` | `[0, -4, 0, 1.57, 0, 0]` | Goal pose |
-| `gate_pose` | `[0, -2, 0, 1.57, 0, 0]` | Intermediate gate pose (visualized) |
-| `gsplat_path` | `nerfstudio/outputs/uturn/...` | Path to splatfacto output |
-| `checkpoint` | `step-000040005.ckpt` | Checkpoint filename |
-| `controller_tflite` | `weights/ctrl.tflite` | Controller TFLite model |
-| `lyapunov_tflite` | `weights/lya.tflite` | Lyapunov network TFLite model |
-| `video_dir` | `videos/` | Output directory for rollout videos |
+Run: imported by other scripts; no standalone entry point.
 
-**Key functions:**
+### `scripts_control/train_ctrl_lya_pt.py`
+Trains the PyTorch controller and Lyapunov models end-to-end.
 
-- `sample_init_poses(target, n)` — Samples `n` random initial poses near the target with bounded uniform noise.
-- `draw_frame(ax, pos, rpy, scale)` — Draws a camera forward-direction arrow on a 3D matplotlib axis.
-- `run_test(...)` — Main rollout loop. For each sampled initial pose, steps the controller for `H` steps, renders the 3D trajectory, Lyapunov curve, and current camera image side-by-side, and saves an `.mp4` video.
+Input:
+- Training data sampled around the target pose
+- A nerfstudio Gaussian Splatting scene checkpoint in `nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825/`
 
-**Output:** Videos saved to `videos/rollout_tf_00.mp4`, `rollout_tf_01.mp4`, etc.
+Output:
+- `weights/ctrl_lya.pt` containing the controller and Lyapunov weights
+- `training_curves.png` with loss and training diagnostics
 
-**Usage:**
+Functionality:
+- Builds pose samples with `PoseDataset`
+- Renders images from the gsplat scene with `render_batch`
+- Optimizes the controller and Lyapunov networks with a curriculum schedule
+- Logs trajectory, Lyapunov, and terminal-state losses during training
+
+Run:
 ```bash
-python3 scripts/test_ctrl_lya_tf.py
+python3 scripts_control/train_ctrl_lya_pt.py
 ```
 
----
+### `scripts_control/test_ctrl_lya_pt.py`
+Runs closed-loop rollout tests with the PyTorch model, renders trajectories, and saves rollout videos in `videos/`.
+
+Run:
+```bash
+python3 scripts_control/test_ctrl_lya_pt.py
+```
+
+### `scripts_control/draw_lya_2d.py`
+Evaluates the Lyapunov function on 2D slices and saves a contour plot to `figures/lya_2d.png`.
+
+Run:
+```bash
+python3 scripts_control/draw_lya_2d.py
+```
+
+### `scripts_render/render_image.py`
+Rendering helper used by the abstract rendering and certification pipeline.
+
+Input:
+- A nerfstudio Gaussian Splatting checkpoint and `dataparser_transforms.json`
+- A 6-DoF pose or pose interval depending on the helper that calls it
+
+Output:
+- A rendered RGB tensor for nominal rendering
+- Lower/upper image bounds when called through the abstract rendering pipeline
+
+Functionality:
+- Loads Gaussian parameters, opacities, scales, and colors from the checkpoint
+- Converts camera poses into the gsplat view-matrix convention
+- Produces rendered images used by certification and visualization scripts
+
+Run: imported by other scripts; no standalone entry point.
+
+### `scripts_render/utils_abstract_render.py`
+Contains bound-propagation helpers for abstract rendering and certification-style analysis.
+
+Run: imported by other scripts; no standalone entry point.
+
+### `scripts_render/utils_alpha_blending.py`
+Implements alpha-blending bound utilities used by the abstract renderer.
+
+Run: imported by other scripts; no standalone entry point.
+
+### `scripts_render/utils_rational_quad.py`
+Provides rational quadratic bound utilities used by the abstract renderer.
+
+Run: imported by other scripts; no standalone entry point.
+
+### `scripts_render/abstract_render_image.py`
+Demonstrates abstract rendering by computing lower, nominal, and upper images for a pose interval.
+
+Input:
+- A pose lower bound and upper bound defined in the script
+- The gsplat scene checkpoint under `nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825/`
+
+Output:
+- Three images: lower bound, nominal, and upper bound renderings
+- `figures/abstract_images.png`
+
+Functionality:
+- Calls `render_bound` to propagate pose uncertainty through the renderer
+- Visualizes the resulting image interval side by side
+- Measures and prints the total rendering time
+
+Run:
+```bash
+python3 scripts_render/abstract_render_image.py
+```
+
+### `scripts_tflite/export_to_tflite.py`
+Exports the PyTorch controller and Lyapunov models to a fused float16 TFLite model.
+
+Input:
+- `weights/ctrl_lya.pt`
+- The PyTorch `Controller` and `Lyapunov` definitions in `scripts_control/utils_ctrl_lya_pt.py`
+
+Output:
+- `weights/fused.onnx` during export
+- `weights/fused_tf_saved/` as an intermediate SavedModel directory
+- `weights/ctrl_lya.tflite` as the final fused TFLite model
+
+Functionality:
+- Wraps the controller and Lyapunov network into a single fused graph
+- Exports the fused graph from PyTorch to ONNX
+- Converts ONNX to TensorFlow SavedModel with `onnx2tf`
+- Converts the SavedModel to float16 TFLite for deployment
+
+Run:
+```bash
+python3 scripts_tflite/export_to_tflite.py
+```
+
+### `scripts_tflite/test_ctrl_lya_tflite.py`
+Runs closed-loop rollout tests using the fused TFLite model, renders trajectories, and saves rollout videos in `videos/`.
+
+Run:
+```bash
+python3 scripts_tflite/test_ctrl_lya_tflite.py
+```
+
+### `scripts_tflite/debug_pt_vs_tflite.py`
+Numerically compares the PyTorch controller/Lyapunov outputs against the fused TFLite model.
+
+Run:
+```bash
+python3 scripts_tflite/debug_pt_vs_tflite.py
+```
+
+### `scripts_cert/certify_control.py`
+Splits the pose space into boxes, checks Lyapunov decrease under the learned controller, and saves certification results.
+
+Input:
+- Pose bounds defined in the script
+- `weights/ctrl_lya.pt` for the controller and Lyapunov model
+- The nerfstudio Gaussian Splatting scene in `nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825/`
+
+Output:
+- `results/cert_result.pt` with the verified boxes and metadata
+- A 3D visualization of verified and non-verified regions
+
+Functionality:
+- Tiles the pose space into smaller boxes
+- Samples states inside each box and evaluates the controller and Lyapunov decrease
+- Marks boxes that satisfy the decrease condition
+- Saves the certification result for later plotting
+
+Run:
+```bash
+python3 scripts_cert/certify_control.py
+```
+
+### `scripts_cert/plot.py`
+Loads a saved certification result and plots the verified and non-verified boxes in 3D.
+
+Run:
+```bash
+python3 scripts_cert/plot.py
+```
 
 ## Dependencies
 
-- `torch`, `gsplat` — 3D Gaussian Splatting rendering
-- `tensorflow` — TFLite model inference
-- `numpy`, `scipy` — Numerical utilities and rotation math
-- `matplotlib` — Visualization and video export
-- `ffmpeg` — Required by `matplotlib.animation.FFMpegWriter` for video saving
+The current imports require the following Python libraries:
 
----
+- `torch`
+- `numpy`
+- `scipy`
+- `matplotlib`
+- `tqdm`
+- `opencv-python` (`cv2`)
+- `gsplat`
+- `nerfstudio`
+- `tensorflow` or `tflite-runtime` or `ai-edge-litert` for TFLite inference/export
+- `onnx` and `onnx2tf` for the export pipeline
 
-## Directory Layout (expected)
+System dependency:
 
+- `ffmpeg` for `matplotlib.animation.FFMpegWriter`
+
+Optional:
+
+- `auto_LiRPA` is present in the repo for experimentation, but it is not required by the currently active certification script.
+
+Example install set:
+
+```bash
+pip install torch numpy scipy matplotlib tqdm opencv-python gsplat nerfstudio tensorflow onnx onnx2tf ai-edge-litert
 ```
-VerifiedVisualController/
-├── nerfstudio/
-│   └── outputs/
-│       └── uturn/splatfacto/2025-05-09_151825/
-│           ├── config.yml
-│           ├── dataparser_transforms.json
-│           └── nerfstudio_models/
-│               └── step-000040005.ckpt
-├── weights/
-│   ├── ctrl.tflite
-│   └── lya.tflite
-├── videos/              # rollout videos written here
-└── scripts/
-    ├── render_image.py
-    ├── ctrl_lya_tf.py
-    └── test_ctrl_lya_tf.py
-```
+
+If you use `tflite-runtime` instead of `tensorflow`, install that package in place of `tensorflow`.

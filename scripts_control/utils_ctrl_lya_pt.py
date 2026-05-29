@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -29,7 +30,7 @@ class Controller(nn.Module):
             nn.Linear(32, 64),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(64, 6),
+            nn.Linear(64, 4),
         )
         
         self.scale_t = 1.0
@@ -100,7 +101,8 @@ class Lyapunov(nn.Module):
             V: (B,) Lyapunov函数值
         """
         pos_error = x[:, :3] - target[:, :3]              # (B, 3)
-        ang_error = x[:, 3:] - target[:, 3:]              # (B, 3)
+        ang_error = x[:, 3:4] - target[:, 3:4]            # (B, 1)
+        # print(pos_error, ang_error)
 
         # --- 基础项 ---
         pos_term = (pos_error ** 2).sum(dim=-1)           # (B,)
@@ -131,4 +133,46 @@ class Lyapunov(nn.Module):
         alpha_reg = -torch.mean(torch.log(4.0 * alpha_clamped * (1 - alpha_clamped)))
 
         return V, alpha_reg
+    
+def transform_drone_velocity_to_world_frame(vel_drone: torch.Tensor) -> torch.Tensor:
 
+
+    linear = vel_drone[..., :3]
+    yaw = vel_drone[..., 3:4]
+
+    # frame transformation (drone -> world)
+    linear_world = torch.stack([
+        -linear[..., 0],   # x flips
+         linear[..., 1],   # y unchanged
+        -linear[..., 2],   # z flips
+    ], dim=-1)
+
+    yaw_world = -yaw
+
+    return torch.cat([linear_world, yaw_world], dim=-1)
+
+
+def transform_drone_velocity_to_world_frame_np(vel_drone: np.ndarray) -> np.ndarray:
+    """
+    Transform drone-frame velocity to world-frame velocity (NumPy version).
+
+    Args:
+        vel_drone: (..., 4) array [vx, vy, vz, yaw_rate]
+
+    Returns:
+        (..., 4) array in world frame
+    """
+
+    linear = vel_drone[..., :3]
+    yaw = vel_drone[..., 3:4]
+
+    # drone -> world frame transform
+    linear_world = np.stack([
+        -linear[..., 0],   # x flips
+         linear[..., 1],   # y unchanged
+        -linear[..., 2],   # z flips
+    ], axis=-1)
+
+    yaw_world = -yaw
+
+    return np.concatenate([linear_world, yaw_world], axis=-1)
