@@ -19,7 +19,7 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 
 # add project root (NOT script dir)
 sys.path.insert(0, _PROJECT_ROOT)
-from scripts_control.utils_ctrl_lya_pt import transform_drone_velocity_to_world_frame_np
+from scripts_control.utils_ctrl_lya_pt import body_to_world_velocity_np
 from scripts_control.render_image import render, load_gsplat_scene
 
 try:
@@ -41,10 +41,11 @@ class Config:
     dt           = 0.1
     H            = 30
     sample_num   = 5
-    target_pose  = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
-    gate_pose    = np.array([0.0, -2.0, -0.2, 1.57, 0.0, 0.0])
-    gsplat_path  = os.path.join(_PROJECT_ROOT, "nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825")
-    checkpoint   = "nerfstudio_models/step-000040005.ckpt"
+    # gate-centered world frame: gate at origin, +y through gate, z down
+    target_pose  = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
+    gate_pose    = np.array([0.0, 0.0, 0.0, np.pi/2, 0.0, 0.0])
+    gsplat_path  = os.path.join(_PROJECT_ROOT, "nerfstudio/outputs/Gate_Long_hloc_seq/splatfacto/2026-06-11_015308_cleaned")
+    checkpoint   = "nerfstudio_models/step-000129999.ckpt"
     fused_tflite = os.path.join(_PROJECT_ROOT, "weights/ctrl_lya.tflite")
     video_dir    = os.path.join(_PROJECT_ROOT, "videos")
 
@@ -130,23 +131,21 @@ class TFLiteFusedModel:
 # HELPERS
 # =============================
 def sample_init_poses(target, n=10):
+    # offsets in the gate-centered frame (see train config for ranges)
     return target + np.random.uniform(
-        low= [-1.5, -1.2, -0.7, -0.5, -0.0, -0.0],
-        high=[ 1.5,  1.2,  0.7,  0.5,  0.0,  0.0],
+        low= [-1.2, -1.2, -0.5, -0.5, -0.0, -0.0],
+        high=[ 1.2,  0.8,  0.4,  0.5,  0.0,  0.0],
         size=(n, 6),
     )
 
 
 def draw_frame(ax, pos, rpy, scale=0.1):
+    # gate-centered world frame: forward is the rotated +x axis
     px, py, pz = pos
     yaw, pitch, roll = rpy
     R = Rotation.from_euler("ZYX", (yaw, pitch, roll)).as_matrix()
-    tmp = Rotation.from_euler("zyx", [-np.pi/2, np.pi/2, 0]).as_matrix()
-    R = R @ tmp
-    R[:, 1:3] *= -1
-    R = R[np.array([0, 2, 1]), :]
-    R[2, :] *= -1
-    forward = R[1, :] / (np.linalg.norm(R[1, :]) + 1e-8)
+    forward = R @ np.array([1.0, 0.0, 0.0])
+    forward = forward / (np.linalg.norm(forward) + 1e-8)
     origin = np.array([px, py, pz])
     ax.quiver(
         origin[0], origin[1], origin[2],
@@ -200,7 +199,7 @@ def run_test(model, scene, target, gate, render_fn,
 
                 # single fused inference: action + V together
                 action_np, V_val = model(img_t, pose_np, target_np)
-                action_np = transform_drone_velocity_to_world_frame_np(action_np)  # in-place transform
+                action_np = body_to_world_velocity_np(action_np, pose_np[:, 3])
                 zeros = np.zeros(action_np.shape[:-1] + (2,), dtype=action_np.dtype)
                 action_np = np.concatenate([action_np, zeros], axis=-1)
                 next_pose_np = pose_np + action_np * dt

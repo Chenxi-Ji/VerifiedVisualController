@@ -11,7 +11,7 @@ from matplotlib.animation import FFMpegWriter
 import io
 
 from render_image import render, render_batch, load_gsplat_scene
-from utils_ctrl_lya_pt import Controller, Lyapunov, transform_drone_velocity_to_world_frame
+from utils_ctrl_lya_pt import Controller, Lyapunov, body_to_world_velocity
 
 # =============================
 # CONFIG
@@ -24,12 +24,13 @@ class Config:
     H = 30
     sample_num = 5
 
-    target_pose = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
-    gate_pose = np.array([0.0, -2.0, -0.2, 1.57, 0.0, 0.0])
+    # gate-centered world frame: gate at origin, +y through gate, z down
+    target_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
+    gate_pose = np.array([0.0, 0.0, 0.0, np.pi/2, 0.0, 0.0])
 
-    # gsplat path
-    gsplat_path = "nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825"
-    checkpoint = "nerfstudio_models/step-000040005.ckpt"
+    # gsplat path (cleaned drone-arena scene)
+    gsplat_path = "nerfstudio/outputs/Gate_Long_hloc_seq/splatfacto/2026-06-11_015308_cleaned"
+    checkpoint = "nerfstudio_models/step-000129999.ckpt"
 
     save_path = "weights/ctrl_lya.pt" #"ctrl_lya.pt"
     video_dir = "videos"
@@ -38,40 +39,25 @@ class Config:
 # INIT POSES
 # =========================
 def sample_init_poses(target, n=10):
+    # offsets in the gate-centered frame (see train config for ranges)
     return target + np.random.uniform(
-        low=[-1.5, -1.2, -0.7, -0.5, -0.0, -0.0],
-        high=[ 1.5,  1.2,  0.7,  0.5,  0.0,  0.0],
+        low=[-1.2, -1.2, -0.5, -0.5, -0.0, -0.0],
+        high=[ 1.2,  0.8,  0.4,  0.5,  0.0,  0.0],
         size=(n, 6)
     )
 
 def draw_frame(ax, pos, rpy, scale=0.1):
     """
-    Draw camera viewing direction matching the rendering pipeline.
+    Draw camera viewing direction (gate-centered world frame: yaw=0 looks
+    along +x, pitch=roll=0 is level, so forward is the rotated +x axis).
     """
     px, py, pz = pos
     yaw, pitch, roll = rpy
-    
-    # Step 1: ZYX Euler to rotation matrix (same as render function)
+
     R = Rotation.from_euler("ZYX", (yaw, pitch, roll)).as_matrix()
-    
-    # Step 2: Apply the same coordinate transformation as in render
-    tmp = Rotation.from_euler('zyx', [-np.pi/2, np.pi/2, 0]).as_matrix()
-    R = R @ tmp
-    
-    # Step 3: Apply the axis flips (matching view[0:3,1:3] *= -1)
-    R[:, 1:3] *= -1
-    
-    # Step 4: Apply the coordinate swap (view = view[np.array([0,2,1,3]),:])
-    # This swaps rows: X, Z, Y order
-    R = R[np.array([0, 2, 1]), :]
-    
-    # Step 5: Negate Z (matching view[2,:] *= -1)
-    R[2, :] *= -1
-    
-    # Step 6: Camera forward direction is along X axis
-    forward = R[1,:]#-R[2, :]  # First row of transformed R matrix
+    forward = R @ np.array([1.0, 0.0, 0.0])
     forward = forward / (np.linalg.norm(forward) + 1e-8)
-    
+
     origin = np.asarray([px, py, pz])
     
     ax.quiver(
@@ -172,7 +158,7 @@ def run_test(ctrl, Vnet, scene, target, gate, render_fn,
                     # control
                     # =========================
                     pred_self = ctrl(img)
-                    pred= transform_drone_velocity_to_world_frame(pred_self)
+                    pred = body_to_world_velocity(pred_self, pose[:, 3])
                     zeros = torch.zeros(*pred.shape[:-1], 2, device=pred.device, dtype=pred.dtype)
                     pred = torch.cat([pred, zeros], dim=-1)
                     next_pose = pose + pred * dt
@@ -269,7 +255,15 @@ if __name__ == "__main__":
     PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
     save_path = os.path.join(PROJECT_ROOT, "../", cfg.save_path)
     ckpt = torch.load(save_path, map_location=device)
-    ctrl.load_state_dict(ckpt["controller"])
+    try:
+        ctrl.load_state_dict(ckpt["controller"])
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"{save_path} does not match the current Controller architecture "
+            "(it is probably from before the 2026-06-11 upgrade). Train new "
+            "weights with train_ctrl_lya_pt.py and copy the resulting "
+            "weights/ctrl_lya_<timestamp>.pt over weights/ctrl_lya.pt."
+        ) from e
     Vnet.load_state_dict(ckpt["lyapunov"])
 
     target = cfg.target_pose

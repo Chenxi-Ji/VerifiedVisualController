@@ -8,6 +8,8 @@ Run in pftolite conda env:
     conda run -n pftolite python scripts_control/export_to_tflite.py
 """
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import sys
 import shutil
 from pathlib import Path

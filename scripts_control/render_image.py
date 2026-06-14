@@ -16,16 +16,20 @@ from gsplat.rendering import rasterization
 class Config:
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # gsplat path
-    gsplat_path = "nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825"
-    checkpoint = "nerfstudio_models/step-000040005.ckpt"
+    # gsplat path (cleaned drone-arena scene)
+    gsplat_path = "nerfstudio/outputs/Gate_Long_hloc_seq/splatfacto/2026-06-11_015308_cleaned"
+    checkpoint = "nerfstudio_models/step-000129999.ckpt"
 
 # =============================
 # GSPLAT LOADING（🔥关键）
 # =============================
-def load_gsplat_scene(cfg):
+def load_gsplat_scene(cfg, use_world_frame=True):
+    """Load gaussians + transforms. use_world_frame=False ignores
+    world_frame.json so poses are interpreted in the raw data space
+    (needed by the scene-exploration tools that work with transforms.json
+    camera poses)."""
     ckpt_path = os.path.join(cfg.gsplat_path, cfg.checkpoint)
-    res = torch.load(ckpt_path)
+    res = torch.load(ckpt_path, weights_only=False, map_location=cfg.device)
 
     means = res['pipeline']['_model.gauss_params.means']
     quats = res['pipeline']['_model.gauss_params.quats']
@@ -34,8 +38,14 @@ def load_gsplat_scene(cfg):
 
     dc = res['pipeline']['_model.gauss_params.features_dc']
     rest = res['pipeline']['_model.gauss_params.features_rest']
-    colors = torch.cat((dc[:, None, :], rest), dim=1)
-    colors = dc[:, None, :]
+    if rest.shape[1] == 0:
+        # sh_degree-0 splatfacto stores sigmoid-space colors, not SH coeffs.
+        # Convert to band-0 SH so rasterization(sh_degree=0) reproduces
+        # sigmoid(dc) exactly: SH0 color = C0 * coeff + 0.5
+        C0 = 0.28209479177387814
+        colors = ((torch.sigmoid(dc) - 0.5) / C0)[:, None, :]
+    else:
+        colors = dc[:, None, :]
 
     # print(dc.shape, rest.shape, colors.shape)
 
@@ -43,10 +53,27 @@ def load_gsplat_scene(cfg):
     with open(os.path.join(cfg.gsplat_path, "dataparser_transforms.json"), "r") as f:
         meta = json.load(f)
 
-    transform = np.array(meta["transform"])
+    transform = np.vstack([np.array(meta["transform"]), [0, 0, 0, 1]])
     scale = meta["scale"]
 
-    return means, quats, opacities, scales, colors, transform, scale
+    # Optional gate-centered world frame (world_frame.json next to config.yml):
+    # poses are then given in a clean frame — origin at the gate center,
+    # +y through the gate, z down — and pitch=roll=0 is level flight.
+    wf_path = os.path.join(cfg.gsplat_path, "world_frame.json")
+    world_frame = use_world_frame and os.path.exists(wf_path)
+    if world_frame:
+        with open(wf_path) as f:
+            W = np.array(json.load(f)["world_transform"])
+        transform = transform @ W
+
+    return means, quats, opacities, scales, colors, transform, scale, world_frame
+
+
+# camera-axes alignment for the world-frame convention:
+# yaw=0,pitch=0,roll=0 looks along +x with the image upright (camera up = -z)
+CAM_AXES = np.array([[0, 0, -1],
+                     [1, 0,  0],
+                     [0, -1, 0]], dtype=np.float64)
 
 # =============================
 # viewmat转换（🔥关键） - 这个函数将相机位姿转换为gsplat的viewmat格式，使用了torch编译以加速计算
@@ -73,24 +100,29 @@ def get_viewmat(optimized_camera_to_world, device = torch.device("cuda" if torch
 # =============================
    
 def render(pose, scene, width = 300, height = 200,
-            fx = 113.258171, fy = 113.347599, 
-            cx = 158.868074, cy = 98.837772, 
+            fx = 113.258171, fy = 113.347599,
+            cx = 158.868074, cy = 98.837772,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
-    means, quats, opacities, scales, colors, transform, scale = scene
+    means, quats, opacities, scales, colors, transform, scale, world_frame = scene
 
     px, py, pz, yaw, pitch, roll = pose
 
     view = np.eye(4)
     R = Rotation.from_euler("ZYX", (yaw, pitch, roll)).as_matrix()
-    view[:3, :3] = R
     view[:3, 3] = [px, py, pz]
 
-    tmp = Rotation.from_euler('zyx', [-np.pi/2, np.pi/2, 0]).as_matrix()
-    view[:3, :3] = view[:3, :3] @ tmp
+    if world_frame:
+        # clean gate-centered convention (world_frame.json composed in transform)
+        view[:3, :3] = R @ CAM_AXES
+    else:
+        # legacy uturn-scene convention
+        view[:3, :3] = R
+        tmp = Rotation.from_euler('zyx', [-np.pi/2, np.pi/2, 0]).as_matrix()
+        view[:3, :3] = view[:3, :3] @ tmp
 
-    view[0:3,1:3] *= -1
-    view = view[np.array([0,2,1,3]),:]
-    view[2,:] *= -1
+        view[0:3,1:3] *= -1
+        view = view[np.array([0,2,1,3]),:]
+        view[2,:] *= -1
 
     view = transform @ view
     view[:3,3] *= scale
@@ -129,7 +161,7 @@ def render_batch(poses, scene,
                  cx=158.868074, cy=98.837772,
                  device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
 
-    means, quats, opacities, scales, colors, transform, scale = scene
+    means, quats, opacities, scales, colors, transform, scale, world_frame = scene
 
     B = poses.shape[0]
 
@@ -146,15 +178,19 @@ def render_batch(poses, scene,
         view = np.eye(4)
 
         R = Rotation.from_euler("ZYX", (yaw, pitch, roll)).as_matrix()
-        view[:3, :3] = R
         view[:3, 3] = [px, py, pz]
 
-        # ---- 坐标变换 ----
-        view[:3, :3] = view[:3, :3] @ tmp
+        if world_frame:
+            view[:3, :3] = R @ CAM_AXES
+        else:
+            view[:3, :3] = R
 
-        view[0:3, 1:3] *= -1
-        view = view[[0, 2, 1, 3], :]
-        view[2, :] *= -1
+            # ---- 坐标变换 ----
+            view[:3, :3] = view[:3, :3] @ tmp
+
+            view[0:3, 1:3] *= -1
+            view = view[[0, 2, 1, 3], :]
+            view[2, :] *= -1
 
         view = transform @ view
         view[:3, 3] *= scale
@@ -169,8 +205,6 @@ def render_batch(poses, scene,
     view = torch.from_numpy(views).float().to(device)
 
     viewmats = get_viewmat(view)
-
-    print(viewmats)
 
     # =============================
     # 3. Ks batch
@@ -232,9 +266,9 @@ if __name__ == "__main__":
     scene = load_gsplat_scene(cfg)
 
     if not test_batch:
-        
-        random_pose = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
-        # random_pose = np.array([0.5813743, -3.2629182,  -0.10773082,  1.9317428,  -0.04433344,  0.13023579])  # 可以修改为其他pose进行测试  
+
+        # gate-centered frame: gate at origin, +y through the gate, z down
+        random_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
 
         img = render(random_pose, scene, device=cfg.device)
 
@@ -248,7 +282,7 @@ if __name__ == "__main__":
         
 
         poses = np.array([
-            [0.0, -4.0, 0.0, 1.57, 0.0, 0.0]
+            [0.0, -2.0, 0.0, np.pi/2, 0.0, 0.0]
         ])
 
         imgs = render_batch(poses, scene, device=device)

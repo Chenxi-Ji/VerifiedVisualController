@@ -2,13 +2,17 @@ import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
 from tqdm import tqdm
 
 from dataclasses import dataclass
+
+_RUN_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 from torch.utils.data import Dataset, DataLoader
 
 from render_image import render, render_batch, load_gsplat_scene
-from utils_ctrl_lya_pt import Lyapunov,Controller, transform_drone_velocity_to_world_frame
+from utils_ctrl_lya_pt import (Lyapunov, Controller, DomainRandomizer,
+                               body_to_world_velocity)
 
 # =============================
 # CONFIG (OPTIMIZED FOR THREE-PHASE CURRICULUM)
@@ -25,14 +29,22 @@ class Config:
 
     dt = 0.1
 
-    target_pose = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
+    # Gate-centered world frame (world_frame.json): gate center at origin,
+    # +y flies through the gate, z down, yaw=pi/2 faces the gate, units are
+    # scene units (~1 ring inner diameter ~= 0.9 u). Target hovers 1.5 u
+    # before the gate at gate-center height.
+    target_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
+    gate_pose = np.array([0.0, 0.0, 0.0, np.pi/2, 0.0, 0.0])
 
-    # gsplat path
-    gsplat_path = "nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825"
-    checkpoint = "nerfstudio_models/step-000040005.ckpt"
+    # gsplat path (cleaned drone-arena scene)
+    gsplat_path = "nerfstudio/outputs/Gate_Long_hloc_seq/splatfacto/2026-06-11_015308_cleaned"
+    checkpoint = "nerfstudio_models/step-000129999.ckpt"
 
-    save_path = "weights/ctrl_lya.pt"
-    figure_path = "training_curves.png"
+    save_path = f"weights/ctrl_lya_{_RUN_STAMP}.pt"
+    figure_path = f"training_curves_{_RUN_STAMP}.png"
+
+    # std of gaussian noise added to the world-frame velocity during rollout
+    actuation_noise = 0.02
 
     # ===== CURRICULUM LEARNING WITH 3 PHASES (100 epochs total) =====
     curriculum_phase1_end = 40
@@ -106,9 +118,13 @@ class Config:
 class PoseDataset(Dataset):
     def __init__(self, target, N=2000):
         self.target = target
+        # offsets around the target (gate-centered frame, z down):
+        #   x: lateral +-1.5, y: -1.5 (3 u before gate) .. +1.0 (0.5 u before),
+        #   z: -0.5 above .. +0.4 below (mats are ~0.65 u below gate center),
+        #   yaw: +-0.6 rad around facing the gate
         self.poses = target + np.random.uniform(
-            low=[-2.0, -1.5, -1.0, -0.7, -0.0, -0.0],
-            high=[2.0, 1.5, 1.0, 0.7, 0.0, 0.0],
+            low=[-1.5, -1.5, -0.5, -0.6, -0.0, -0.0],
+            high=[1.5, 1.0, 0.4, 0.6, 0.0, 0.0],
             size=(N, 6)
         )
 
@@ -377,6 +393,7 @@ def train():
 
     ctrl = Controller().to(device)
     Vnet = Lyapunov().to(device)
+    domain_rand = DomainRandomizer()
     
     # Single optimizer
     opt = torch.optim.Adam(
@@ -460,8 +477,12 @@ def train():
 
             for step in range(H):
 
-                pred_self = ctrl(img_curr)
-                pred= transform_drone_velocity_to_world_frame(pred_self)
+                # domain randomization on the (detached) observation only
+                pred_self = ctrl(domain_rand(img_curr))
+                pred = body_to_world_velocity(pred_self, pose_curr[:, 3])
+                # small actuation noise for robustness to imperfect tracking
+                if cfg.actuation_noise > 0:
+                    pred = pred + torch.randn_like(pred) * cfg.actuation_noise
                 zeros = torch.zeros(*pred.shape[:-1], 2, device=pred.device, dtype=pred.dtype)
                 pred = torch.cat([pred, zeros], dim=-1)
 

@@ -23,10 +23,10 @@ except ImportError:
 
 
 # =============================
-# POSE RANGE (x,y,z,yaw)
+# POSE RANGE (x,y,z,yaw) — gate-centered world frame training region
 # =============================
-_POSE_LOW  = np.array([-1.5, -4.2, -0.7, -3.14, 0.0, 0.0], dtype=np.float32)
-_POSE_HIGH = np.array([ 1.5, -1.8,  0.7,  3.14, 0.0, 0.0], dtype=np.float32)
+_POSE_LOW  = np.array([-1.5, -3.0, -0.5, -3.14, 0.0, 0.0], dtype=np.float32)
+_POSE_HIGH = np.array([ 1.5, -0.5,  0.4,  3.14, 0.0, 0.0], dtype=np.float32)
 
 
 # =============================
