@@ -98,7 +98,7 @@ def export_onnx(weights_dir):
     fused_onnx = os.path.join(weights_dir, "fused.onnx")
     torch.onnx.export(
         fused,
-        (torch.randn(1, 3, 200, 300), torch.randn(1, 6), torch.randn(1, 6)),
+        (torch.randn(1, 3, 192, 256), torch.randn(1, 6), torch.randn(1, 6)),
         fused_onnx,
         input_names=["image", "pose", "target"],
         output_names=["action", "V"],

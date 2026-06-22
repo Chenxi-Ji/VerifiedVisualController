@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import numpy as np
+import cv2
 import matplotlib.pyplot as plt
 
 from dataclasses import dataclass
@@ -99,9 +100,10 @@ def get_viewmat(optimized_camera_to_world, device = torch.device("cuda" if torch
 # RENDER（优化版）
 # =============================
    
-def render(pose, scene, width = 300, height = 200,
-            fx = 113.258171, fy = 113.347599,
-            cx = 158.868074, cy = 98.837772,
+def render(pose, scene, width = 1024, height = 768,
+            fx = 484.490530, fy = 485.462987,
+            cx = 510.073476, cy = 365.591079,
+            out_width = 256, out_height = 192,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     means, quats, opacities, scales, colors, transform, scale, world_frame = scene
 
@@ -150,15 +152,22 @@ def render(pose, scene, width = 300, height = 200,
         sparse_grad=False,
         absgrad=True,
         rasterize_mode="classic",
+        camera_model="fisheye",
     )
 
-    img = rgb[0, ..., :3].clamp(0, 1)
-    return img.permute(2, 0, 1).to(device)
+    img = rgb[0, ..., :3].clamp(0, 1)            # (height, width, 3) at full fisheye res
+    # Replicate the on-drone preprocessing EXACTLY: cv2 INTER_LINEAR downscale
+    # 1024x768 -> 256x192 (matches model_helper.cpp:302). The image is detached
+    # before the controller, so this non-differentiable resize is safe.
+    img = cv2.resize(img.detach().cpu().numpy(), (out_width, out_height),
+                     interpolation=cv2.INTER_LINEAR)
+    return torch.from_numpy(img).permute(2, 0, 1).to(device)
     
 def render_batch(poses, scene,
-                 width=300, height=200,
-                 fx=113.258171, fy=113.347599,
-                 cx=158.868074, cy=98.837772,
+                 width=1024, height=768,
+                 fx=484.490530, fy=485.462987,
+                 cx=510.073476, cy=365.591079,
+                 out_width=256, out_height=192,
                  device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
 
     means, quats, opacities, scales, colors, transform, scale, world_frame = scene
@@ -247,13 +256,19 @@ def render_batch(poses, scene,
         sparse_grad=False,
         absgrad=True,
         rasterize_mode="classic",
+        camera_model="fisheye",
     )
 
     # =============================
     # 6. 输出 (B,3,H,W)
     # =============================
-    imgs = rgb[..., :3].clamp(0, 1)  # (B,H,W,3)
-    imgs = imgs.permute(0, 3, 1, 2)  # (B,3,H,W)
+    imgs = rgb[..., :3].clamp(0, 1)  # (B,H,W,3) at full fisheye res
+    # Replicate the on-drone preprocessing EXACTLY: cv2 INTER_LINEAR per frame,
+    # 1024x768 -> 256x192 (matches model_helper.cpp:302).
+    imgs_np = imgs.detach().cpu().numpy()
+    imgs_np = np.stack([cv2.resize(im, (out_width, out_height),
+                                   interpolation=cv2.INTER_LINEAR) for im in imgs_np], axis=0)
+    imgs = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).to(device)  # (B,3,out_h,out_w)
 
     return imgs
 

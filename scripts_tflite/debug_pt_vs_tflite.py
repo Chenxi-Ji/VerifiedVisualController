@@ -141,8 +141,8 @@ def compare_controller(ctrl_pt, fused, n=50, seed=42):
     rng = np.random.default_rng(seed)
     diffs = []
     for _ in range(n):
-        img_nchw = rng.uniform(0, 1, (1, 3, 200, 300)).astype(np.float32)
-        img_nhwc = img_nchw[0].transpose(1, 2, 0)[np.newaxis]   # (1,200,300,3)
+        img_nchw = rng.uniform(0, 1, (1, 3, 192, 256)).astype(np.float32)
+        img_nhwc = img_nchw[0].transpose(1, 2, 0)[np.newaxis]   # (1,192,256,3)
 
         with torch.no_grad():
             pt_out = ctrl_pt(torch.tensor(img_nchw)).numpy()    # (1,6)
@@ -187,7 +187,7 @@ def compare_lyapunov(lya_pt, fused, n=100, seed=0):
             )
 
         _, V_tfl = fused(
-            torch.zeros((1, 3, 200, 300)),
+            torch.zeros((1, 3, 192, 256)),
             pose,
             target
         )

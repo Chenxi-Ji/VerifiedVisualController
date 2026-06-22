@@ -79,9 +79,10 @@ class DomainRandomizer:
     deployed/verified network is untouched — it just sees a wider visual
     distribution (lighting, color balance, sensor noise, blur, occlusion).
     """
-    def __init__(self, brightness=0.15, contrast=0.2, color=0.08,
-                 gamma=0.25, noise_std=0.02, blur_p=0.2,
-                 cutout_p=0.3, cutout_frac=0.18):
+    def __init__(self, brightness=0.22, contrast=0.25, color=0.14,
+                 gamma=0.30, noise_std=0.03, blur_p=0.30,
+                 cutout_p=0.3, cutout_frac=0.18,
+                 geo_p=0.8, geo_rot_deg=1.0, geo_scale=0.02, geo_trans=0.01):
         self.brightness = brightness
         self.contrast = contrast
         self.color = color
@@ -90,6 +91,13 @@ class DomainRandomizer:
         self.blur_p = blur_p
         self.cutout_p = cutout_p
         self.cutout_frac = cutout_frac
+        # geometric jitter: robustness to the residual between the gsplat
+        # equidistant-fisheye render and the real IMX412 lens (k1..k4 ≲1px at
+        # the edge, ~0.5px calib error, rolling shutter, lens-unit variation).
+        self.geo_p = geo_p
+        self.geo_rot_deg = geo_rot_deg
+        self.geo_scale = geo_scale
+        self.geo_trans = geo_trans
 
     @torch.no_grad()
     def __call__(self, imgs):
@@ -97,6 +105,25 @@ class DomainRandomizer:
         B, _, H, W = imgs.shape
         dev = imgs.device
         x = imgs.clone()
+
+        # small geometric jitter (rotation / scale / translation) on the rendered
+        # scene before the photometric/sensor effects below — widens the geometric
+        # distribution so the net tolerates camera-model / calibration residual.
+        geo_mask = torch.rand(B, device=dev) < self.geo_p
+        if geo_mask.any():
+            idx = torch.where(geo_mask)[0]
+            n = idx.numel()
+            ang = (torch.rand(n, device=dev) * 2 - 1) * (self.geo_rot_deg * np.pi / 180.0)
+            sc = 1.0 + (torch.rand(n, device=dev) * 2 - 1) * self.geo_scale
+            tx = (torch.rand(n, device=dev) * 2 - 1) * self.geo_trans * 2.0
+            ty = (torch.rand(n, device=dev) * 2 - 1) * self.geo_trans * 2.0
+            cos, sin = torch.cos(ang) * sc, torch.sin(ang) * sc
+            theta = torch.zeros(n, 2, 3, device=dev)
+            theta[:, 0, 0], theta[:, 0, 1], theta[:, 0, 2] = cos, -sin, tx
+            theta[:, 1, 0], theta[:, 1, 1], theta[:, 1, 2] = sin, cos, ty
+            grid = F.affine_grid(theta, [n, 3, H, W], align_corners=False)
+            x[idx] = F.grid_sample(x[idx], grid, mode='bilinear',
+                                   padding_mode='border', align_corners=False)
 
         # gamma (illumination response)
         g = 1.0 + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * self.gamma
