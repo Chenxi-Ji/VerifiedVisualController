@@ -18,8 +18,8 @@ class Config:
 
     dt = 0.1
 
-    # [x, y, z, yaw, pitch, roll] — gate-centered world frame
-    target_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
+    # [x, y, z, yaw, pitch, roll] — gate-centered world frame (+y deploy side)
+    target_pose = np.array([0.0, 1.5, 0.0, -np.pi/2, 0.0, 0.0])
 
     save_path = "weights/ctrl_lya.pt"
 

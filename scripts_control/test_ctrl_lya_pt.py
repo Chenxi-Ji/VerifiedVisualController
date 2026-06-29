@@ -24,9 +24,10 @@ class Config:
     H = 30
     sample_num = 5
 
-    # gate-centered world frame: gate at origin, +y through gate, z down
-    target_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
-    gate_pose = np.array([0.0, 0.0, 0.0, np.pi/2, 0.0, 0.0])
+    # gate-centered world frame: gate at origin, +y through gate, z down.
+    # DEPLOY SIDE = +y face: approach from +y, yaw=-pi/2 faces the gate.
+    target_pose = np.array([0.0, 1.5, 0.0, -np.pi/2, 0.0, 0.0])
+    gate_pose = np.array([0.0, 0.0, 0.0, -np.pi/2, 0.0, 0.0])
 
     # gsplat path (cleaned drone-arena scene)
     gsplat_path = "nerfstudio/outputs/Gate_Long_hloc_seq/splatfacto/2026-06-11_015308_cleaned"
@@ -41,8 +42,8 @@ class Config:
 def sample_init_poses(target, n=10):
     # offsets in the gate-centered frame (see train config for ranges)
     return target + np.random.uniform(
-        low=[-1.2, -1.2, -0.5, -0.5, -0.0, -0.0],
-        high=[ 1.2,  0.8,  0.4,  0.5,  0.0,  0.0],
+        low=[-1.2, -0.8, -0.5, -0.5, -0.0, -0.0],
+        high=[ 1.2,  1.2,  0.4,  0.5,  0.0,  0.0],
         size=(n, 6)
     )
 

@@ -30,11 +30,13 @@ class Config:
     dt = 0.1
 
     # Gate-centered world frame (world_frame.json): gate center at origin,
-    # +y flies through the gate, z down, yaw=pi/2 faces the gate, units are
-    # scene units (~1 ring inner diameter ~= 0.9 u). Target hovers 1.5 u
-    # before the gate at gate-center height.
-    target_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
-    gate_pose = np.array([0.0, 0.0, 0.0, np.pi/2, 0.0, 0.0])
+    # +y flies through the gate, z down, units are scene units (~1 ring inner
+    # diameter ~= 0.9 u). DEPLOY SIDE = the +y face (the bold-chevron face the
+    # real drone actually sees; the -y face is washed out in the splat and was
+    # the source of the sim2real failure). We approach from +y, so the target
+    # hovers 1.5 u in front of the gate on the +y side and yaw=-pi/2 faces it.
+    target_pose = np.array([0.0, 1.5, 0.0, -np.pi/2, 0.0, 0.0])
+    gate_pose = np.array([0.0, 0.0, 0.0, -np.pi/2, 0.0, 0.0])
 
     # gsplat path (cleaned drone-arena scene)
     gsplat_path = "nerfstudio/outputs/Gate_Long_hloc_seq/splatfacto/2026-06-11_015308_cleaned"
@@ -45,6 +47,10 @@ class Config:
 
     # std of gaussian noise added to the world-frame velocity during rollout
     actuation_noise = 0.02
+
+    # camera-model domain randomization: jitter render intrinsics + mount per epoch
+    # (simulates lens / FOV / mount mismatch the image-space affine jitter can't)
+    intrinsics_jitter = True
 
     # ===== CURRICULUM LEARNING WITH 3 PHASES (100 epochs total) =====
     curriculum_phase1_end = 40
@@ -118,13 +124,17 @@ class Config:
 class PoseDataset(Dataset):
     def __init__(self, target, N=2000):
         self.target = target
-        # offsets around the target (gate-centered frame, z down):
-        #   x: lateral +-1.5, y: -1.5 (3 u before gate) .. +1.0 (0.5 u before),
+        # offsets around the target (gate-centered frame, +y deploy side, z down):
+        #   x: lateral +-1.5, y: -1.0 (0.5 u in front) .. +1.5 (3 u in front),
         #   z: -0.5 above .. +0.4 below (mats are ~0.65 u below gate center),
-        #   yaw: +-0.6 rad around facing the gate
+        #   yaw: +-0.6 rad around facing the gate (target yaw = -pi/2),
+        #   pitch/roll: +-0.20 rad (~11 deg) body-attitude DR -- a real quad
+        #     tilts to translate, so the camera sees tilted views. Pitch/roll are
+        #     held constant over the rollout (the controller can't command them),
+        #     and the angle losses are yaw-only so this tilt is not penalized.
         self.poses = target + np.random.uniform(
-            low=[-1.5, -1.5, -0.5, -0.6, -0.0, -0.0],
-            high=[1.5, 1.0, 0.4, 0.6, 0.0, 0.0],
+            low=[-1.5, -1.0, -0.5, -0.6, -0.20, -0.20],
+            high=[1.5, 1.5, 0.4, 0.6, 0.20, 0.20],
             size=(N, 6)
         )
 
@@ -151,8 +161,11 @@ def compute_traj_loss(initial_pose, final_pose, target, H, dt,
     init_pos_dist = torch.norm(initial_pose[:, :3] - target[:, :3], dim=-1)
     final_pos_dist = torch.norm(final_pose[:, :3] - target[:, :3], dim=-1)
 
-    init_ang_error = initial_pose[:, 3:] - target[:, 3:]
-    final_ang_error = final_pose[:, 3:] - target[:, 3:]
+    # yaw-only angle error (pitch/roll are DR'd and uncontrollable by the
+    # controller, so they must not enter the objective -- matches the yaw-only
+    # Lyapunov in utils_ctrl_lya_pt.py)
+    init_ang_error = initial_pose[:, 3:4] - target[:, 3:4]
+    final_ang_error = final_pose[:, 3:4] - target[:, 3:4]
 
     init_ang_dist = (init_ang_error ** 2).sum(dim=-1)
     final_ang_dist = (final_ang_error ** 2).sum(dim=-1)
@@ -200,7 +213,8 @@ def compute_final_state_loss(final_pose, target, epoch=None):
     - Higher angle weight when position error is small
     """
     pos_error = final_pose[:, :3] - target[:, :3]
-    ang_error = final_pose[:, 3:] - target[:, 3:]
+    # yaw-only (pitch/roll are DR'd and uncontrollable -> not penalized)
+    ang_error = final_pose[:, 3:4] - target[:, 3:4]
 
     pos_dist = torch.norm(pos_error, dim=-1)
     ang_dist = torch.norm(ang_error, dim=-1)
@@ -413,16 +427,41 @@ def train():
     
     # Image cache
     img_cache = ImageCache(max_size=3000)
-    
+
+    # Camera-model domain randomization: base (calibrated) render intrinsics + a
+    # per-epoch jittered copy. render() rasterizes the fisheye at 1024x768 with these
+    # then resizes to the model's 256x192; jittering fx/fy/cx/cy + a small mount
+    # yaw/pitch/roll each epoch simulates the lens-unit / FOV / mount mismatch that
+    # image-space affine jitter cannot (true camera-model variation).
+    _BASE_K = dict(fx=504.341405, fy=503.319815, cx=505.485234, cy=367.606186)  # VOXL2 hires_small_color calib (reproj 0.37px)
+    render_K = dict(_BASE_K, dyaw=0.0, dpitch=0.0, droll=0.0)
+
     def get_image(pose_np):
-        """Get image with caching to avoid redundant renders."""
+        """Render (cached) with the current epoch's jittered camera model."""
         cached = img_cache.get(pose_np)
         if cached is not None:
             return cached
-        
-        img = render(pose_np, scene, device=device)
+        p = pose_np.copy()
+        p[3] += render_K["dyaw"]; p[4] += render_K["dpitch"]; p[5] += render_K["droll"]
+        img = render(p, scene, fx=render_K["fx"], fy=render_K["fy"],
+                     cx=render_K["cx"], cy=render_K["cy"], device=device)
         img_cache.set(pose_np, img)
         return img
+
+    def jitter_camera_model():
+        """Resample per-epoch render intrinsics + mount offset, then drop the cache.
+        Intrinsics jitter is SMALL (~0.5 px calibration residual): the real IMX412
+        intrinsics are about to be measured and dropped in, so this only needs to
+        cover calibration uncertainty, not a wide FOV search. Body attitude is
+        handled separately by the pitch/roll DR in PoseDataset."""
+        render_K["fx"] = _BASE_K["fx"] * (1.0 + np.random.uniform(-0.004, 0.004))  # ~0.5 px at edge
+        render_K["fy"] = _BASE_K["fy"] * (1.0 + np.random.uniform(-0.004, 0.004))
+        render_K["cx"] = _BASE_K["cx"] + np.random.uniform(-0.5, 0.5)              # ~0.5 px
+        render_K["cy"] = _BASE_K["cy"] + np.random.uniform(-0.5, 0.5)
+        render_K["dyaw"]   = np.radians(np.random.uniform(-0.5, 0.5))              # small residual mount
+        render_K["dpitch"] = np.radians(np.random.uniform(-0.5, 0.5))
+        render_K["droll"]  = np.radians(np.random.uniform(-0.5, 0.5))
+        img_cache.cache.clear()
 
     # Loss history tracking
     loss_hist = {
@@ -435,6 +474,9 @@ def train():
     pbar = tqdm(range(start_epoch, cfg.epochs), desc="Training", dynamic_ncols=True, leave=True)
 
     for ep in pbar:
+        # camera-model domain randomization: new render intrinsics + mount this epoch
+        if cfg.intrinsics_jitter:
+            jitter_camera_model()
         # ===== Curriculum weights and horizon =====
         weights = cfg.get_loss_weights(ep)
         H = cfg.get_horizon(ep)

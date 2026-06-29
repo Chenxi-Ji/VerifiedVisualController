@@ -17,39 +17,49 @@ def clamp_relu(x, limit):
 class Controller(nn.Module):
     """CNN vision controller.
 
-    Designed to stay verifiable and drone-deployable:
-      - ops are Conv/BatchNorm/ReLU/AvgPool/Linear only (all supported by
-        alpha-beta-CROWN; BN folds into the conv at inference)
-      - leading AvgPool2d(2) downsample cuts the per-layer neuron count 4x,
-        which directly reduces verification cost on the 300x200 input
-      - ~52k parameters (~110 KB as float16 TFLite)
+    Verifiable + drone-deployable:
+      - ops are Conv/BatchNorm/ReLU/AvgPool/Linear + a linear input mean-subtract
+        (all alpha-beta-CROWN-supported; BN folds into the conv at inference)
+      - per-image per-channel mean subtraction in forward() -> invariant to global
+        color/brightness cast (the dominant sim-to-real gap)
+      - coarse (3x4) spatial readout (not global pool) so the head sees where the
+        gate is, instead of averaging position away
       - action clamping uses the exact ReLU formulation (clamp_relu)
+    NOTE: widened backbone (prof-approved) -> more capacity but higher verify cost.
     """
     def __init__(self):
         super().__init__()
 
+        # Widened backbone (prof-approved): ~2x channels for capacity/robustness.
+        # Still Conv/BN/ReLU/AvgPool only -> alpha-beta-CROWN-verifiable (costs
+        # more to verify). Sizes shown for the 192x256 input.
         self.backbone = nn.Sequential(
-            nn.AvgPool2d(2),                       # 200x300 -> 100x150
-            nn.Conv2d(3, 16, 5, 2, 2),             # -> 50x75
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, 3, 2, 1),            # -> 25x38
+            nn.AvgPool2d(2),                       # 192x256 -> 96x128
+            nn.Conv2d(6, 32, 5, 2, 2),             # 6ch = raw RGB + mean-sub RGB -> 48x64
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 48, 3, 2, 1),            # -> 13x19
-            nn.BatchNorm2d(48),
-            nn.ReLU(),
-            nn.Conv2d(48, 64, 3, 2, 1),            # -> 7x10
+            nn.Conv2d(32, 64, 3, 2, 1),            # -> 24x32
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
+            nn.Conv2d(64, 96, 3, 2, 1),            # -> 12x16
+            nn.BatchNorm2d(96),
+            nn.ReLU(),
+            nn.Conv2d(96, 128, 3, 2, 1),           # -> 6x8
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            # COARSE spatial readout instead of global (1,1) pool, so the action
+            # head can see *where* the gate is (left/center/right, up/mid/down,
+            # gate scale/offset/asymmetry). 4x6 = finer layout than 3x4.
+            nn.AdaptiveAvgPool2d((4, 6)),          # -> 128 x 4 x 6
+            nn.Flatten(),                          # -> 3072
         )
 
         self.action_head = nn.Sequential(
-            nn.Linear(64, 64),
+            nn.Linear(128 * 4 * 6, 128),
             nn.ReLU(),
             nn.Dropout(0.1),
+            nn.Linear(128, 64),
+            nn.ReLU(),
             nn.Linear(64, 4),
         )
 
@@ -61,6 +71,14 @@ class Controller(nn.Module):
         x: (B, 3, H, W) RGB images in [0, 1]
         Returns: (B, 4) action [vx, vy, vz, yaw_rate] in the drone body frame
         """
+        # Feed BOTH raw RGB and per-channel mean-subtracted RGB (6 channels):
+        #   - mean-sub removes ADDITIVE per-image/per-channel color bias (warm/cool cast)
+        #   - raw keeps absolute brightness/color, which still carries useful info
+        # Mean-sub does NOT remove contrast, gamma, clipping, saturation, or
+        # exposure-scale (gain) changes -- DR covers those. Both branches are linear
+        # in x, so this stays alpha-beta-CROWN-verifiable.
+        x = torch.cat([x, x - x.mean(dim=(2, 3), keepdim=True)], dim=1)
+
         features = self.backbone(x)
         action = self.action_head(features)
 
@@ -79,13 +97,19 @@ class DomainRandomizer:
     deployed/verified network is untouched — it just sees a wider visual
     distribution (lighting, color balance, sensor noise, blur, occlusion).
     """
-    def __init__(self, brightness=0.22, contrast=0.25, color=0.14,
+    def __init__(self, contrast=0.25, color=0.14, saturation=0.30, exposure=0.08,
                  gamma=0.30, noise_std=0.03, blur_p=0.30,
                  cutout_p=0.3, cutout_frac=0.18,
                  geo_p=0.8, geo_rot_deg=1.0, geo_scale=0.02, geo_trans=0.01):
-        self.brightness = brightness
+        # Pure additive brightness was dropped (mean-sub cancels a uniform shift),
+        # but `exposure` is kept SMALL on purpose: a shift FOLLOWED BY clamp simulates
+        # auto-exposure clipping (saturated highlights / crushed blacks) — nonlinear,
+        # so mean-sub canNOT undo it. DR also covers contrast/saturation/gamma/noise/
+        # blur/occlusion/geometry, none of which mean-sub removes.
         self.contrast = contrast
         self.color = color
+        self.saturation = saturation
+        self.exposure = exposure
         self.gamma = gamma
         self.noise_std = noise_std
         self.blur_p = blur_p
@@ -129,14 +153,24 @@ class DomainRandomizer:
         g = 1.0 + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * self.gamma
         x = x.clamp(1e-4, 1.0) ** g
 
-        # brightness / contrast
-        b = (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * self.brightness
+        # contrast only (additive brightness removed — mean-sub makes it a no-op)
         c = 1.0 + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * self.contrast
         m = x.mean(dim=(2, 3), keepdim=True)
-        x = (x - m) * c + m + b
+        x = (x - m) * c + m
 
-        # per-channel color gain (white balance shift)
+        # saturation jitter: scale chroma about per-pixel gray. Targets the vivid
+        # orange (real) vs muted (render) gate — which mean-subtraction does NOT
+        # fix, since it only removes the per-channel mean, not chroma intensity.
+        gray = x.mean(dim=1, keepdim=True)
+        s = 1.0 + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * self.saturation
+        x = gray + (x - gray) * s
+
+        # per-channel color gain (white-balance / relative-channel jitter)
         x = x * (1.0 + (torch.rand(B, 3, 1, 1, device=dev) * 2 - 1) * self.color)
+
+        # exposure jitter WITH clipping: shift then clamp -> simulates auto-exposure
+        # saturating highlights / crushing blacks (nonlinear; mean-sub can't undo it)
+        x = (x + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * self.exposure).clamp(0.0, 1.0)
 
         # light blur on a random subset (defocus / motion approximation)
         blur_mask = torch.rand(B, device=dev) < self.blur_p
@@ -272,47 +306,8 @@ def body_to_world_velocity_np(vel_body: np.ndarray, yaw: np.ndarray) -> np.ndarr
 
 
 # =============================
-# LEGACY (old uturn-scene fixed-axis transform, kept for compatibility)
+# (LEGACY uturn-scene fixed-axis velocity transform [-vx, vy, -vz; -yaw] REMOVED
+#  2026-06-25 — it was dead code and a footgun sitting next to the real
+#  body_to_world_velocity above. The active rollout/test path uses the correct
+#  yaw-aware body_to_world_velocity / _np ONLY.)
 # =============================
-def transform_drone_velocity_to_world_frame(vel_drone: torch.Tensor) -> torch.Tensor:
-
-
-    linear = vel_drone[..., :3]
-    yaw = vel_drone[..., 3:4]
-
-    # frame transformation (drone -> world)
-    linear_world = torch.stack([
-        -linear[..., 0],   # x flips
-         linear[..., 1],   # y unchanged
-        -linear[..., 2],   # z flips
-    ], dim=-1)
-
-    yaw_world = -yaw
-
-    return torch.cat([linear_world, yaw_world], dim=-1)
-
-
-def transform_drone_velocity_to_world_frame_np(vel_drone: np.ndarray) -> np.ndarray:
-    """
-    Transform drone-frame velocity to world-frame velocity (NumPy version).
-
-    Args:
-        vel_drone: (..., 4) array [vx, vy, vz, yaw_rate]
-
-    Returns:
-        (..., 4) array in world frame
-    """
-
-    linear = vel_drone[..., :3]
-    yaw = vel_drone[..., 3:4]
-
-    # drone -> world frame transform
-    linear_world = np.stack([
-        -linear[..., 0],   # x flips
-         linear[..., 1],   # y unchanged
-        -linear[..., 2],   # z flips
-    ], axis=-1)
-
-    yaw_world = -yaw
-
-    return np.concatenate([linear_world, yaw_world], axis=-1)
