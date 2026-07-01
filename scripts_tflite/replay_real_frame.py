@@ -39,7 +39,7 @@ def set_in(key, arr):
     it.set_tensor(ins[name], arr.astype(np.float32))
 set_in("image",  img)
 set_in("pose",   np.zeros((1, 6), np.float32))
-set_in("target", np.array([[0.0, -1.5, 0.0, np.pi / 2, 0.0, 0.0]], np.float32))
+set_in("target", np.array([[0.0, 1.5, 0.0, -np.pi / 2, 0.0, 0.0]], np.float32))
 it.invoke()
 
 action = V = None

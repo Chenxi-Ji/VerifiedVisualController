@@ -101,8 +101,8 @@ def get_viewmat(optimized_camera_to_world, device = torch.device("cuda" if torch
 # =============================
    
 def render(pose, scene, width = 1024, height = 768,
-            fx = 484.490530, fy = 485.462987,
-            cx = 510.073476, cy = 365.591079,
+            fx = 504.341405, fy = 503.319815,   # VOXL2 hires_small_color calib (reproj 0.37px)
+            cx = 505.485234, cy = 367.606186,
             out_width = 256, out_height = 192,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     means, quats, opacities, scales, colors, transform, scale, world_frame = scene
@@ -165,8 +165,8 @@ def render(pose, scene, width = 1024, height = 768,
     
 def render_batch(poses, scene,
                  width=1024, height=768,
-                 fx=484.490530, fy=485.462987,
-                 cx=510.073476, cy=365.591079,
+                 fx=504.341405, fy=503.319815,   # VOXL2 hires_small_color calib (reproj 0.37px)
+                 cx=505.485234, cy=367.606186,
                  out_width=256, out_height=192,
                  device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
 
@@ -282,8 +282,8 @@ if __name__ == "__main__":
 
     if not test_batch:
 
-        # gate-centered frame: gate at origin, +y through the gate, z down
-        random_pose = np.array([0.0, -1.5, 0.0, np.pi/2, 0.0, 0.0])
+        # gate-centered frame: gate at origin, +y through the gate, z down (+y deploy side)
+        random_pose = np.array([0.0, 1.5, 0.0, -np.pi/2, 0.0, 0.0])
 
         img = render(random_pose, scene, device=cfg.device)
 
@@ -297,7 +297,7 @@ if __name__ == "__main__":
         
 
         poses = np.array([
-            [0.0, -2.0, 0.0, np.pi/2, 0.0, 0.0]
+            [0.0, 2.0, 0.0, -np.pi/2, 0.0, 0.0]
         ])
 
         imgs = render_batch(poses, scene, device=device)
