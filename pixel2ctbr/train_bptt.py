@@ -24,8 +24,9 @@ from train_bc import closed_loop_eval  # noqa: E402
 DEV = "cuda"
 HUBER = torch.nn.functional.huber_loss
 BURN = 6          # unscored GRU warm-up steps at chain start
-CHAIN = 10        # scored windows per episode chain (10 x 16-32 steps
-                  # = 4-8 s of continuous on-policy flight per chain)
+CHAIN = 13        # scored windows per episode chain (13 x 32 steps at
+                  # dt=0.025 = 10.4 s — covers the slow-convergence regime
+                  # the 8-16 s probe exposed (tail diagnosis, 05 log))
 
 
 def window_loss(env: HoverEnv, states, actions):
@@ -46,7 +47,7 @@ def window_loss(env: HoverEnv, states, actions):
         # run-5 orbited the target at 0.4-0.6 m forever (05 log). This term
         # keeps the pressure on inside 1 m.
         en = e_p.norm(dim=-1)
-        l_pos = l_pos + wt * 3.0 * (torch.exp(-en / 0.4) * en ** 2).mean()
+        l_pos = l_pos + wt * 5.0 * (torch.exp(-en / 0.3) * en ** 2).mean()
         near = torch.exp(-en.detach())                     # damp v near target
         spd = s.v.norm(dim=-1)
         l_vel = l_vel + wt * (near * spd.clamp(max=5.0) ** 2).mean() * 0.5 \
@@ -245,6 +246,12 @@ def main():
                 states, actions, h, labels, feats = env.policy_rollout(
                     policy, H, h0=h.detach(), with_expert=True, with_feat=True)
                 loss, parts = window_loss(env, states, actions)
+                # chain-position weighting: late-chain windows are the
+                # steady-state regime — weighting them up makes a PARKED
+                # 20 cm offset expensive (the anti-steady-state-error
+                # pressure; tail diagnosis showed failures park just outside
+                # the ring with no start/DR pocket)
+                loss = loss * (0.6 + 0.8 * c / (CHAIN - 1))
                 # feats[i] sees the PRE-step-i observation -> supervise with
                 # the pre-step velocity (= states[i-1]); first feat dropped
                 l_aux = sum(
@@ -277,7 +284,9 @@ def main():
         if sched is not None:
             sched.step()
         if (ep + 1) % 2 == 0 or ep == args.epochs - 1:
-            m = closed_loop_eval(env, policy)
+            m = closed_loop_eval(env, policy)              # 8 s (the gate)
+            m12 = closed_loop_eval(env, policy, T=480, resets=2)
+            print(f"  eval12s: {m12}")
             if args.polish:
                 for mod in policy.modules():
                     if isinstance(mod, torch.nn.BatchNorm2d):
