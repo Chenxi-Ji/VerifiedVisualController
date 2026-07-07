@@ -1,3 +1,5 @@
 nerfstudio/
-__pycache__/ 
+__pycache__/
 .claude/
+auto_LiRPA/
+backups/
