@@ -48,6 +48,11 @@ def window_loss(env: HoverEnv, states, actions):
         # keeps the pressure on inside 1 m.
         en = e_p.norm(dim=-1)
         l_pos = l_pos + wt * 5.0 * (torch.exp(-en / 0.3) * en ** 2).mean()
+        # soft time-outside-ring: the differentiable version of the gate's
+        # position criterion itself — bills every step spent outside 0.15 m,
+        # pressuring convergence SPEED (tail diagnosis: success 71%@8s vs
+        # 86%@16s — the tail is slow, not lost)
+        l_pos = l_pos + wt * 1.5 * torch.sigmoid((en - 0.15) / 0.04).mean()
         near = torch.exp(-en.detach())                     # damp v near target
         spd = s.v.norm(dim=-1)
         l_vel = l_vel + wt * (near * spd.clamp(max=5.0) ** 2).mean() * 0.5 \

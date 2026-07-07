@@ -24,8 +24,8 @@ from dynamics import G, QuadState, quat_rotate_inv
 
 
 class GeometricHoverExpert:
-    def __init__(self, kp=3.5, kd=3.2, ki=1.5, kyaw=2.0, katt=5.5,
-                 a_lat_max=4.0, tilt_max=0.45, c_min=2.0, c_max=18.0,
+    def __init__(self, kp=4.2, kd=3.5, ki=2.2, kyaw=2.0, katt=7.0,
+                 a_lat_max=4.5, tilt_max=0.45, c_min=2.0, c_max=18.0,
                  integ_cap=2.0, dt=0.025):
         self.kp, self.kd, self.ki, self.kyaw, self.katt = kp, kd, ki, kyaw, katt
         self.a_lat_max = a_lat_max      # m/s^2 cap on commanded plane accel
