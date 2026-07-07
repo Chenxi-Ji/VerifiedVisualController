@@ -186,13 +186,93 @@ VIO+gate-detector instead of raw pixels, IBVS/optical-flow hover, nano-drone
 works, and the 2024–2026 frontier. Will be merged here with per-paper
 obs/action/rate/code tables and lessons.)*
 
-## 4. Starling 2 / PX4 deployment facts ⏳
+## 4. Starling 2 / PX4 deployment facts (verified against pinned sources)
 
-*(Thread still in flight — camera/IMU specs and MPA latencies, MAVSDK
-set_attitude_rate semantics and PX4 failsafe behavior without EKF aiding,
-VOXL2 inference options and achievable rates, hover-thrust numbers for the
-sim's thrust map. Will be merged here; numbers feed 04_design.md and the DR
-ranges in dynamics.py.)*
+*Sources pinned: PX4 v1.14.3, MAVSDK v2.12.2, modalai/px4-firmware `voxl-dev`
+@12b5c2c6c42, shipped `voxl-px4-params` (D0014_Starling_2.params, SDK 1.7) and
+`voxl-esc` files, docs.modalai.com / forum staff posts. Two adversarial
+verification passes; every load-bearing claim 2–3 independent confirmations.*
+
+### Sensors
+- **Hires = Sony IMX412** (not IMX214), 12.3 MP **rolling shutter** color,
+  ~146° D-FOV; our current 1024×768 input is its `hires_small_color` stream;
+  stock latency ~45–50 ms (low-latency driver: 11–16 ms for the encode path).
+- **Tracking = onsemi AR0144, 1280×800 GLOBAL shutter grayscale, 162° fisheye,
+  30 fps stock / 50 max** (staff-confirmed limit), RAW8 `preview` pipe ≈
+  15–20 ms glass-to-client — the lowest-latency CV path (what QVIO consumes).
+  Dual (C26) or triple (C27) config — check the unit.
+- **IMU**: 2× ICM-42688-P — IMU0 owned by PX4 on the DSP (8 kHz FIFO → 800 Hz
+  loop); IMU1 → `/run/mpa/imu_apps` at 1 kHz (~976 Hz actual), default FIFO
+  drain 100 Hz (≈10-sample batches; raise poll to 500 Hz or write `"read"` to
+  the control pipe per frame — the voxl-qvio-server recipe). `imu_data_t` =
+  40 B packed, **CLOCK_MONOTONIC — same clock domain as camera timestamps**
+  (camera stamps = start-of-exposure; use +exposure/2).
+- Baro ICP-101xx on the DSP; no onboard mag (mag on the GPS puck).
+
+### PX4 offboard body-rate path (the load-bearing facts)
+- MAVSDK `set_attitude_rate(AttitudeRate(roll°/s, pitch°/s, yaw°/s,
+  thrust01))` → SET_ATTITUDE_TARGET **type_mask=128**, rad/s on wire, thrust =
+  normalized collective 0–1 → `thrust_body[2] = −thrust`, no clamping.
+  MAVSDK auto-resends the last setpoint at 20 Hz; PX4 needs >2 Hz and ~1 s of
+  streaming before `offboard.start()`.
+- **Body-rate offboard needs NO position/velocity estimate on v1.14**
+  (source-verified: offboardCheck.cpp gates only pos/vel/accel setpoint types;
+  mode_requirements.cpp asks only angular-velocity + attitude + offboard
+  signal). Attitude tilt-init is IMU-only.
+- **Param recipe** (no-mocap): `EKF2_HGT_REF=0` (**ships as 3=vision!**),
+  `EKF2_GPS_CTRL=0`, `EKF2_EV_CTRL=0`, `EKF2_MAG_TYPE=5` (mag connected+
+  calibrated passes arming but is never fused; yaw drifts — irrelevant for a
+  body-rate policy) or remove mag + `SYS_HAS_MAG=0`; `COM_OBL_RC_ACT=2`
+  (Stabilized); `COM_OF_LOSS_T` 0.3–0.5 s.
+- **Failsafe traps**: PX4 **holds the last body-rate setpoint until
+  COM_OF_LOSS_T** (default 1.0 s) — a stale aggressive rate command is a
+  crash; ModalAI ships **`MUORB_KAF_LAND=1`** (apps↔DSP keep-alive timeout
+  1 s ⇒ blind descent) — our inference service must not starve voxl-px4;
+  land-detector (`COM_DISARM_LAND=0.1 s`, `LNDMC_ROT_MAX=30°/s`) can
+  false-disarm a low-thrust hover near the floor — tether test.
+- RC mode-switch always exits OFFBOARD instantly; brief the pilot to flip to
+  **Stabilized** (not Position) — safety modes without estimates: Manual/
+  Stabilized, Acro, Altitude(baro).
+
+### Rate loop to replicate in sim (shipped Starling 2 tune)
+- Rate PID (K=1): roll 0.072/0.171/0.0009, pitch 0.097/0.228/0.0011, yaw
+  0.15/0.5/0; attitude P 16/16/2.8; loop at **800 Hz** (`IMU_GYRO_RATEMAX`);
+  gyro LPF 80 Hz + D-term 60 Hz + ESC-RPM dynamic notch.
+- **ModalAI-fork-only `MC_ROLL/PITCH/YAW_CUTOFF` = 30/30/10 Hz: first-order
+  LPF on the rate-PID torque output** (active in offboard rate mode) ⇒ extra
+  pole τ ≈ 5.3/5.3/15.9 ms.
+- **No shaping of offboard rate setpoints** in mainline (`MC_*RATE_MAX`
+  130/130/150 °/s applies only to the attitude controller's output, NOT to
+  offboard rate setpoints; no thrust slew; battery comp off).
+- Motor τ 10–30 ms [low confidence — RPM-closed-loop ESC, no published
+  number]; closed-loop rate bandwidth ~10–20 Hz [estimate]. End-to-end
+  command→force on comparable platforms ~35–40 ms.
+
+### Physical / thrust numbers (sim table, confidence-tagged in the source)
+- TOW **285 g**; motors 1504-3000KV, 120 mm props, 2S; rotor arms ±0.085/
+  ±0.0625 m; κ_yaw 0.05.
+- **`MPC_THR_HOVER 0.34`**, thrust curve `rel_thrust = 0.9·s² + 0.1·s`,
+  ESC RPM-closed-loop 2000–15000 RPM ⇒ hover ≈ 9300 RPM, per-motor 0.70 N,
+  k_T ≈ 8.1e-9 N/RPM², **T/W ≈ 2.6–2.9** [derived, medium confidence].
+- Thrust map for deployment: `thrust01 = 0.34·c/g` linear v1; full-curve
+  inversion available.
+
+### Onboard inference
+- voxl-tflite-server = TFLite **2.8.0** on SDK 1.x (master: 2.17.1) — convert
+  against matching TF or hit op-version errors; delegates: CPU=XNNPACK
+  8 threads, GPU=OpenCL (documented **custom-model corruption pattern** —
+  matches our history), NNAPI=Hexagon (int8 only).
+- Benchmarks: MobileNetV1-224 CPU 19.7 ms; small models don't win on GPU.
+  **Our ~119 k-param 96×128 net: est. 0.3–3 ms on 1–2 A77 threads
+  (pin to cores 4–6, `voxl-set-cpu-mode perf`) ⇒ 30–50 Hz comfortable.**
+  Anchors: 200 Hz state-based NN on VOXL2 Mini (2510.04724); FalconGym 2.0's
+  U-Net at 8 Hz on a Starling 2.
+- **No published system runs an onboard NN → CTBR offboard on VOXL2 — this
+  would be a first.** Nearby: NTNU's motor-RPM MLP as a custom PX4 module at
+  250 Hz (2503.01471); E2E-Fly 30 Hz CTBR via Betaflight bridge; SimpleFlight
+  100 Hz CTBR (2412.11764); SkyJEPA claims 100 Hz minimum for their stack —
+  counter-evidence: SOUS VIDE flew CTBR at 20 Hz, E2E-Fly at 30 Hz; our 40 Hz
+  target with delay-in-training is defensible.
 
 ## 5. Synthesis (updated as threads land)
 

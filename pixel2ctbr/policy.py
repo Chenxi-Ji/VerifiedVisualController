@@ -60,7 +60,10 @@ class PixelCTBRPolicy(nn.Module):
 
     def features(self, image):
         """image (B,1,96,128) in [0,1] -> (B,120)."""
-        m = image.mean(dim=(2, 3), keepdim=True)
+        # mean-sub via avg-pool, NOT .mean(): ReduceMean exports to a TFLite
+        # MEAN op with an INT64 axis the runtime rejects; AveragePool is on
+        # the verified-op list (export_policy.py finding, 05 log)
+        m = torch.nn.functional.adaptive_avg_pool2d(image, 1)
         x = torch.cat((image, image - m), dim=1)
         f = self.trunk(x)
         return torch.cat((self.global_pool(f).flatten(1),

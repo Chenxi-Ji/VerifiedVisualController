@@ -158,3 +158,40 @@ with scaled K, `packed=True`, chunked ≤64/call, per-episode camera DR
 
 Throughput at policy res (128×96, ss=2, chunk 64, RTX 5080): **295 img/s**.
 Budget math: distillation (~300 k frames) ≈ 17 min; SHAC/BPTT (1–10 M) ≈ 1–9 h.
+
+## 2026-07-07 — policy + env + both trainers built and smoke-tested ✅
+
+- `policy.py` — 118,932 params; gray mean-sub 2-ch input; legacy trunk minus
+  the front AvgPool (at 96×128 the pool would land on 3×4, not the 6×8 map the
+  readouts are designed for — caught at spec time); 120-D readouts → +12-D
+  proprio → GRUCell(96) → head with hover-centered thrust scaling; zero-init
+  head ⇒ exact hover output at init (verified). Bounds clamp verified.
+- `env.py` — `HoverEnv`: reset (start box + velocity randomization + per-episode
+  DynParams/IMU/camera DR + tilt-dropout mask), `observe()` (render → gray DR →
+  12-D normalized proprio), `expert_rollout` (BC data, uint8 CPU),
+  `policy_rollout` (differentiable, images detached), `success_metrics`.
+  Everything on GPU (device-mixing refactored away). Gray DR = legacy subset:
+  affine/gamma/contrast/exposure-clamp/blur/noise/cutout.
+- `train_bc.py` — Phase A: expert collection (measured **400 frames/s** incl.
+  DR), chunk-32 TBPTT with 8-step burn-in, Huber on normalized channels,
+  DAgger rounds with the expert's integrator replayed along student
+  trajectories. Smoke: mechanics verified; metrics meaningless at smoke scale.
+- `train_bptt.py` — Phase B: window losses (position/velocity-near-target/
+  yaw+tilt/action/jerk, Huber), horizon curriculum 8→32, BN frozen from
+  Phase A, visited-state restart buffer (ABPT), grad-clip 1.0. Smoke: grads
+  flow (gn 0.03→0.96 across horizons), ~3.5 s/window at H=32 B=48 ⇒ full run
+  2–3.5 h.
+- **Full Phase A launched** (30×64×160 ≈ 307 k frames, 8 epochs, 2 DAgger) →
+  logs/bc_run1.log.
+
+## 2026-07-07 — deployment addendum (agent report, partial)
+
+ModalAI px4-firmware fork adds `MC_ROLL/PITCH/YAW_CUTOFF` first-order LPF **on
+rate-PID torque output** (active in offboard rate mode); Starling 2 ships
+30/30/10 Hz ⇒ extra pole τ≈5.3 ms roll/pitch, ≈15.9 ms yaw. Our τ_ω DR
+(20–100 ms) dominates these poles — covered, but noted for system ID. No-mocap
+arming recipe: `EKF2_MAG_TYPE=5` (mag present+calibrated but unfused; passes
+arming checks; yaw = drifting gyro integral — fine for body-rate policy) or
+remove mag + `SYS_HAS_MAG=0`; `EKF2_HGT_REF=0` (baro). MAVSDK
+`AttitudeRate(roll_deg_s, pitch_deg_s, yaw_deg_s, thrust_value)` confirmed
+(PX4 v1.14.3 / MAVSDK v2.12.2 pins). Full main report re-requested.

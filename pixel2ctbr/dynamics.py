@@ -136,14 +136,19 @@ class DynParams:
 
     @staticmethod
     def randomized(batch: int, device="cpu", g: torch.Generator | None = None) -> "DynParams":
-        """DR ranges ⚠ initial guesses; tighten/widen after system ID."""
+        """DR ranges centered on the deployment-research numbers for Starling 2
+        (01_research_report §4: T/W ≈2.6–2.9 derived medium-confidence; rate
+        closed-loop bw ~10–20 Hz + fork torque LPF 5–16 ms + motor τ 10–30 ms
+        low-confidence ⇒ τ_ω 15–60 ms; glass→command ~20–35 ms tracking cam /
+        ~45+ hires ⇒ delay 1–4 ctrl steps at 25 ms). Widened around each
+        estimate because none are system-identified yet."""
         u = lambda lo, hi: lo + (hi - lo) * torch.rand((batch,), device=device, generator=g)
         return DynParams(
-            twr=u(1.6, 2.6),
-            tau_w=u(0.02, 0.10),
-            tau_c=u(0.015, 0.06),
+            twr=u(2.0, 3.2),
+            tau_w=u(0.015, 0.06),
+            tau_c=u(0.010, 0.045),
             kd_lin=u(0.0, 0.30),
-            delay_steps=torch.randint(2, 5, (batch,), device=device, generator=g),
+            delay_steps=torch.randint(1, 5, (batch,), device=device, generator=g),
             thrust_gain=u(0.85, 1.15),
         )
 
