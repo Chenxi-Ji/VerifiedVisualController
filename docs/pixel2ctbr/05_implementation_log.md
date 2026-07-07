@@ -499,3 +499,44 @@ uncommitted ctrl_lya edits untouched):
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
   MEAN(INT64 axis) runtime rejection → mean-sub reexpressed as AvgPool.
 - Memory + PROJECT_STATE pointers to the new phase.
+
+## 2026-07-07 (later) — milestone-2 v1: multi-gate tracks via splat editing
+
+Full write-up: 07_multigate_envs.md. The one measured gate becomes N-gate
+tracks with FalconGym-2.0's editable-gsplat recipe (box-select in a metric
+frame → copy the five gaussian tensors → rigid-transform means+quats →
+concat). Read both local FalconGym copies: editing code byte-identical
+(mini = code + data + extra plane-DR demos); their Aruco-frame permutation
+chain doesn't apply to us — our composed dataparser+world_frame transform
+IS the gate frame, so `scene_edit.py` reduces the math to one rigid 4×4 +
+uniform scale (rigidity 1.2e-7, round-trip 5e-7 m, identity-duplicate
+exact; asserted in __main__). Crop box ((−.72,.72),(−.28,.28),(−.72,.60))
+m = 38,839 gaussians: ring+hoop+collar, stand legs EXCLUDED (would drag a
+floor patch under every copy) ⇒ duplicates float — accepted. SplatRenderer
+gains `scene=`.
+
+`env_multigate.MultiGateEnv` generalizes the transit phase machine to a
+waypoint list: per-gate pre-gate commit waypoints, the tuned commit gate
+evaluated in each gate's own plane coordinates, per-gate signed-plane
+crossing detection with a NEW frame-annulus bound (FRAME_R 0.75 m —
+oblique infinite planes otherwise bill phantom strikes). Same
+rollout/metrics interface as GateTransitEnv; `--task
+two_gate|three_gate_turn` wired in train_bptt (perception term now aims at
+the current phase's gate).
+
+Tracks + expert oracles (B=256, DR'd plants, state-only):
+- **two_gate** (second gate at y=−2.2 m): **100/99.6/100/99.6%** over
+  seeds 5/1/11/42, all crossings clean, exit err ~3 mm. Residual 1/256 = a
+  far-corner start overshooting wp₀ through the plane at |x|=0.39 m
+  (honest frame-risk; recovers and finishes).
+- **three_gate_turn** (40°/gate toward +x, 2.0 m chords — next gate ~20°
+  off-axis at each pass; +x arc keeps the track shallow in −y): 87.5% at
+  20 s was pure unsettled braking → **100% at 22 s** (EVAL_T 880).
+
+Visual gate (spike_multigate.py, 512×384 color + 128×96 policy-eye):
+duplicated rings crisp everywhere, gate 3 visible THROUGH gate 2 from its
+pre-wp, gate 2 visible inside gate 1 at policy resolution. Worst imagery:
+two-gate exit (y=−3 m facing −y, smeared extrapolation — braking phase
+only); three-gate exit faces +x and is much better. Throughput at training
+settings: 400→367→316 img/s (pristine/two/three; −8%/−21%, still ≥ the 295
+img/s design number).

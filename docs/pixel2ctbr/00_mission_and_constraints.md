@@ -144,3 +144,4 @@ measures, hardware, compute location (onboard?), and code availability.
 - `04_design.md` — the chosen system, end to end.
 - `05_implementation_log.md` — running log while building.
 - `06_verification.md` — tests, sim evals, onboard benches, flight protocol.
+- `07_multigate_envs.md` — milestone-2 multi-gate tracks (splat editing, envs).
