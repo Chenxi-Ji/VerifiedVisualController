@@ -23,6 +23,7 @@ from train_bc import closed_loop_eval  # noqa: E402
 
 DEV = "cuda"
 HUBER = torch.nn.functional.huber_loss
+BURN = 6          # unscored GRU warm-up steps per window
 
 
 def window_loss(env: HoverEnv, states, actions):
@@ -66,9 +67,13 @@ def window_loss(env: HoverEnv, states, actions):
 
 
 def horizon_for_epoch(ep, total):
-    """8 -> 16 -> 24 -> 32 curriculum."""
+    """16 -> 24 -> 32 -> 32 curriculum (0.4-0.8 s of physics per window).
+    NOT starting at 8: the legacy trainer's shortest window was 0.7 s
+    (7 steps at dt=0.1); 8 steps at dt=0.025 is only 0.2 s — too short for
+    the position loss to be reducible, so gradients chase noise (run1/run2
+    divergence, 05 log)."""
     fr = ep / max(total - 1, 1)
-    return [8, 16, 24, 32][min(3, int(fr * 4))]
+    return [16, 24, 32, 32][min(3, int(fr * 4))]
 
 
 class VisitedBuffer:
@@ -147,7 +152,13 @@ def main():
         for w in range(args.windows):
             env.reset()
             buf.sample_into(env, frac=0.5)
-            states, actions, _ = env.policy_rollout(policy, H)
+            # burn-in: BURN unscored no-grad steps so the GRU has context
+            # before any step is billed — otherwise half the gradients come
+            # from an h=0-blind recurrent state that never occurs in steady
+            # closed-loop flight (Phase A's chunk burn-in served the same role)
+            _, _, h = env.policy_rollout(policy, BURN, no_grad=True)
+            env.state = env.state.detach()
+            states, actions, _ = env.policy_rollout(policy, H, h0=h.detach())
             loss, parts = window_loss(env, states, actions)
             opt.zero_grad()
             loss.backward()
