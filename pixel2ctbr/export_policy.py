@@ -24,6 +24,43 @@ from policy import PixelCTBRPolicy, VEC_DIM  # noqa: E402
 H_IMG, W_IMG = 96, 128
 
 
+class ExportWrapper(torch.nn.Module):
+    """onnx2tf chokes on per-frame channel Slice ops in features() (axis
+    bookkeeping after NCHW->NHWC, same converter-bug genus as the legacy
+    non-dividing-pool). This wrapper builds the mean-sub channels with a
+    single cat -> channel order [cur, prev, cur-m, prev-m] instead of the
+    training order [cur, cur-m, prev, prev-m], and compensates by permuting
+    conv1's input-channel weights. Verified numerically by the parity check."""
+
+    def __init__(self, m: PixelCTBRPolicy):
+        super().__init__()
+        import copy
+        self.m = copy.deepcopy(m)
+        w = self.m.trunk[0][0].weight.data          # (16, 2*frames, 5, 5)
+        f = self.m.frames
+        # training order idx of each export-order channel:
+        # export ch j in [0..f-1] = raw frame j   -> training idx 2*j
+        # export ch f+j          = frame j - mean -> training idx 2*j+1
+        perm = [2 * j for j in range(f)] + [2 * j + 1 for j in range(f)]
+        self.m.trunk[0][0].weight.data = w[:, perm].contiguous()
+
+    def forward(self, image, vec, h):
+        mimg = torch.nn.functional.adaptive_avg_pool2d(image, 1)
+        x = torch.cat((image, image - mimg), dim=1)
+        fmap = self.m.trunk(x)
+        feat = torch.cat((self.m.global_pool(fmap).flatten(1),
+                          self.m.lat(fmap).flatten(1),
+                          self.m.vert(fmap).flatten(1)), dim=-1)
+        z = torch.cat((self.m.img_proj(feat), self.m.vec_mlp(vec)), dim=-1)
+        h2 = self.m.gru(z, h)
+        raw = self.m.head(torch.cat((h2, z), dim=-1))
+        from policy import C_CENTER, C_SPAN, RATE_LIM, clamp_relu
+        c = C_CENTER + clamp_relu(raw[:, :1], 1.0) * C_SPAN
+        rl = torch.tensor(RATE_LIM)
+        w_ = clamp_relu(raw[:, 1:] * rl, rl)
+        return torch.cat((c, w_), dim=-1), h2
+
+
 def export(weights, out_dir="weights", steps=1000):
     torch.manual_seed(0)
     m = PixelCTBRPolicy()
@@ -35,11 +72,12 @@ def export(weights, out_dir="weights", steps=1000):
         print("WARNING: exporting random-init weights (parity test only)")
     m.eval()
     hid = m.hidden
+    mx = ExportWrapper(m).eval()
 
     onnx_path = f"{out_dir}/pixel_ctbr.onnx"
     torch.onnx.export(
-        m, (torch.zeros(1, m.frames, H_IMG, W_IMG), torch.zeros(1, VEC_DIM),
-            torch.zeros(1, hid)),
+        mx, (torch.zeros(1, m.frames, H_IMG, W_IMG), torch.zeros(1, VEC_DIM),
+             torch.zeros(1, hid)),
         onnx_path, opset_version=18, dynamo=False,
         input_names=["image", "vec", "h_in"], output_names=["action", "h_out"])
 
