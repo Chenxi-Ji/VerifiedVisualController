@@ -479,7 +479,26 @@ uncommitted ctrl_lya edits untouched):
    and a Swift/Geles perception term (keep gate near optical axis, approach
    phase only). Training run pends GPU (v12 in flight).
 
-## 2026-07-07 — day-1 close-out
+## 2026-07-07 (later) — v13 consolidation run: new best 85.9%
+
+Design: from v10-best; ring loss RAMPED 0→1.0 over 6 epochs (v11/v12
+attribution: the abrupt introduction was the regressor, independent of the
+teacher — v12 ring-only also regressed); **distance-scaled speed allowance**
+(cap 1.2+0.6·min(dist,2) m/s: fast approach, tight arrival — the flat
+1.5 m/s cap was billing transit speed); lr 8e-5 cosine→8e-6, 24 epochs,
+CHAIN 13, BN frozen, best-checkpoint saving.
+
+Trajectory (8 s gate): 56.8 (ramp start, = v10's own ep-2) → 80.7 (ep 4! —
+v10 needed 12 epochs to reach this) → oscillation band 68–84 through the
+mid-run → **85.9% @ ep 18 (new overall best)** → 81–84 tail. 12 s gates
+touched 91.7% with p95 8–9 cm; medians tightened to 2.9–3.6 cm. At ep 12
+the 8 s p95 hit 13.8 cm — position is inside the ring for ~95% of episodes;
+the strict composite is increasingly velocity/yaw-limited at the timestamp.
+
+Deliverable selection: definitive fixed-seed 512-episode evals running on
+BOTH v13-best (pixel_ctbr_final5.pt) and v10-best (pixel_ctbr_final2.pt) —
+v10-best never had its own definitive pass (the earlier 69.1% table was the
+first polish checkpoint). Winner becomes the exported tflite.
 
 - Definitive 512-episode eval + ablations: see 06_verification.md §B
   (base 69.1% / 9.5 cm / 0 crashes; DR-off ≈ base ⇒ no twin-overfit;
