@@ -33,13 +33,18 @@ def normalize_vec(gyro, accel, tilt, last_action):
 
 
 class PixelCTBRPolicy(nn.Module):
-    def __init__(self, hidden=96):
+    def __init__(self, hidden=96, frames=2):
+        """frames=2: input is [current, previous] grayscale frames — visual
+        velocity via frame differencing. The privileged-velocity probe showed
+        velocity information was the plateau (05 log); two frames are the
+        deployable source of it (model helper caches one frame)."""
         super().__init__()
         self.hidden = hidden
+        self.frames = frames
         conv = lambda i, o, k, s, p: nn.Sequential(
             nn.Conv2d(i, o, k, stride=s, padding=p), nn.BatchNorm2d(o), nn.ReLU())
-        self.trunk = nn.Sequential(                     # in: (B,2,96,128)
-            conv(2, 16, 5, 2, 2),                       # 48x64
+        self.trunk = nn.Sequential(                     # in: (B,2*frames,96,128)
+            conv(2 * frames, 16, 5, 2, 2),              # 48x64
             conv(16, 32, 3, 2, 1),                      # 24x32
             conv(32, 48, 3, 2, 1),                      # 12x16
             conv(48, 64, 3, 2, 1),                      # 6x8
@@ -64,27 +69,40 @@ class PixelCTBRPolicy(nn.Module):
         nn.init.zeros_(self.head[-1].bias)
 
     def features(self, image):
-        """image (B,1,96,128) in [0,1] -> (B,120)."""
+        """image (B,frames,96,128) in [0,1] (dim1: [current, previous]) ->
+        (B,120)."""
         # mean-sub via avg-pool, NOT .mean(): ReduceMean exports to a TFLite
         # MEAN op with an INT64 axis the runtime rejects; AveragePool is on
         # the verified-op list (export_policy.py finding, 05 log)
         m = torch.nn.functional.adaptive_avg_pool2d(image, 1)
-        x = torch.cat((image, image - m), dim=1)
+        # per-frame [raw, raw - mean] pairs, current frame first (so the
+        # 2-frame graft can zero-init the previous-frame channels)
+        parts = []
+        for i in range(image.shape[1]):
+            parts += [image[:, i:i + 1], image[:, i:i + 1] - m[:, i:i + 1]]
+        x = torch.cat(parts, dim=1)
         f = self.trunk(x)
         return torch.cat((self.global_pool(f).flatten(1),
                           self.lat(f).flatten(1),
                           self.vert(f).flatten(1)), dim=-1)
 
-    def forward(self, image, vec, h):
-        """-> action (B,4) [c m/s^2, w rad/s], new hidden (B,H)."""
+    def forward(self, image, vec, h, return_feat=False):
+        """-> action (B,4) [c m/s^2, w rad/s], new hidden (B,H).
+        return_feat additionally returns [h2, z] for train-time auxiliary
+        heads (velocity supervision); NEVER set during export — the default
+        two-output signature is what gets traced."""
         z = torch.cat((self.img_proj(self.features(image)),
                        self.vec_mlp(vec)), dim=-1)
         h2 = self.gru(z, h)
-        raw = self.head(torch.cat((h2, z), dim=-1))
+        feat = torch.cat((h2, z), dim=-1)
+        raw = self.head(feat)
         c = C_CENTER + clamp_relu(raw[:, :1], 1.0) * C_SPAN
         rl = torch.tensor(RATE_LIM, device=raw.device)
         w = clamp_relu(raw[:, 1:] * rl, rl)
-        return torch.cat((c, w), dim=-1), h2
+        a = torch.cat((c, w), dim=-1)
+        if return_feat:
+            return a, h2, feat
+        return a, h2
 
     def init_hidden(self, B, device="cpu"):
         return torch.zeros(B, self.hidden, device=device)
@@ -93,7 +111,7 @@ class PixelCTBRPolicy(nn.Module):
 if __name__ == "__main__":
     m = PixelCTBRPolicy()
     n = sum(p.numel() for p in m.parameters())
-    img = torch.rand(2, 1, 96, 128)
+    img = torch.rand(2, m.frames, 96, 128)
     vec = torch.zeros(2, VEC_DIM)
     a, h = m(img, vec, m.init_hidden(2))
     print(f"params: {n:,} | action {a.shape} hidden {h.shape}")

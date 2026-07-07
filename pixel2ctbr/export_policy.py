@@ -38,7 +38,7 @@ def export(weights, out_dir="weights", steps=1000):
 
     onnx_path = f"{out_dir}/pixel_ctbr.onnx"
     torch.onnx.export(
-        m, (torch.zeros(1, 1, H_IMG, W_IMG), torch.zeros(1, VEC_DIM),
+        m, (torch.zeros(1, m.frames, H_IMG, W_IMG), torch.zeros(1, VEC_DIM),
             torch.zeros(1, hid)),
         onnx_path, opset_version=18, dynamo=False,
         input_names=["image", "vec", "h_in"], output_names=["action", "h_out"])
@@ -67,7 +67,7 @@ def export(weights, out_dir="weights", steps=1000):
             h_d = d
         elif shp[-1] == VEC_DIM:
             vec_d = d
-    nhwc = img_d["shape"][-1] == 1
+    nhwc = img_d["shape"][-1] == m.frames   # onnx2tf converts NCHW->NHWC
     outs = it.get_output_details()
 
     rng = np.random.default_rng(0)
@@ -76,7 +76,7 @@ def export(weights, out_dir="weights", steps=1000):
     max_a = max_h = 0.0
     with torch.no_grad():
         for _ in range(steps):
-            img = rng.random((1, 1, H_IMG, W_IMG), dtype=np.float32)
+            img = rng.random((1, m.frames, H_IMG, W_IMG), dtype=np.float32)
             vec = (rng.standard_normal((1, VEC_DIM)) * 0.5).astype(np.float32)
             a_pt, h_pt = m(torch.from_numpy(img), torch.from_numpy(vec), h_pt)
             it.set_tensor(img_d["index"], img.transpose(0, 2, 3, 1) if nhwc else img)

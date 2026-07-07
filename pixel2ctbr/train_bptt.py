@@ -172,6 +172,15 @@ def main():
                 policy.head[0].bias.copy_(sd["head.0.bias"])
             print(f"grafted {hk}: old {tuple(old_w.shape)} into h-slice of "
                   f"{tuple(policy.head[0].weight.shape)}, skip-slice zeroed")
+        ck = "trunk.0.0.weight"   # 2-frame graft: conv1 in-ch 2 -> 4
+        if ck in sd and ck in missing:
+            old_w = sd[ck]
+            with torch.no_grad():
+                policy.trunk[0][0].weight.zero_()
+                policy.trunk[0][0].weight[:, :old_w.shape[1]].copy_(old_w)
+            print(f"grafted {ck}: old {tuple(old_w.shape)} into current-frame "
+                  f"channels of {tuple(policy.trunk[0][0].weight.shape)}, "
+                  f"prev-frame channels zeroed")
         print(f"warm start from {args.init} ({len(kept)}/{len(own)} tensors; "
               f"fresh: {missing})")
     else:
@@ -182,9 +191,16 @@ def main():
         if isinstance(m, torch.nn.BatchNorm2d):
             m.eval()
 
-    opt = torch.optim.Adam(policy.parameters(), lr=args.lr)
+    # auxiliary velocity head (train-time only, never exported): forces the
+    # trunk+GRU to encode body velocity from the frame pair — the privileged-v
+    # probe proved velocity information is what converges this task (05 log:
+    # 0.55 m plateau -> 0.113 m with true v). Supervised on true body v.
+    aux_v = torch.nn.Linear(policy.hidden + 96, 3).to(DEV)
+    opt = torch.optim.Adam(list(policy.parameters()) + list(aux_v.parameters()),
+                           lr=args.lr)
     scale = torch.tensor([C_SPAN, *RATE_LIM], device=DEV)
     bc_w = torch.tensor([1.0, 2.0, 2.0, 1.5], device=DEV)
+    from dynamics import quat_rotate_inv
     for ep in range(args.epochs):
         H = horizon_for_epoch(ep, args.epochs)
         t0 = time.time()
@@ -216,9 +232,17 @@ def main():
             _, _, h = env.policy_rollout(policy, BURN, no_grad=True)
             for c in range(CHAIN):
                 env.state = env.state.detach()
-                states, actions, h, labels = env.policy_rollout(
-                    policy, H, h0=h.detach(), with_expert=True)
+                states, actions, h, labels, feats = env.policy_rollout(
+                    policy, H, h0=h.detach(), with_expert=True, with_feat=True)
                 loss, parts = window_loss(env, states, actions)
+                # feats[i] sees the PRE-step-i observation -> supervise with
+                # the pre-step velocity (= states[i-1]); first feat dropped
+                l_aux = sum(
+                    HUBER(aux_v(f),
+                          quat_rotate_inv(s.q.detach(), s.v.detach()) / 2.0)
+                    for f, s in zip(feats[1:], states[:-1])) / max(len(feats) - 1, 1)
+                loss = loss + 0.5 * l_aux
+                parts["aux"] = 0.5 * float(l_aux)
                 # expert anchor: dense gradients that bypass the plant
                 # (bootstrap-RL-with-IL); the expert's integrator runs along
                 # the whole chain, so its labels carry the integral-action

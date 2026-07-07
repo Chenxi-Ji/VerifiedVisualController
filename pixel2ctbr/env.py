@@ -143,19 +143,27 @@ class HoverEnv:
         self.renderer.sample_episode_dr(
             B, g=torch.Generator(device=dev).manual_seed(
                 int(torch.randint(1 << 30, (1,), generator=g))))
+        self.prev_frame = None   # primed on first observe()
         return self.state
 
     # ------------------------------------------------------------- obs
     @torch.no_grad()
     def observe(self):
-        """-> image (B,1,H,W) on device, vec (B,12) on CPU (sensors detached)."""
+        """-> image (B,2,H,W) [current, previous] on device, vec (B,12).
+        Each frame is DR'd once when current and reused as previous — exactly
+        how deployment behaves (each camera frame preprocessed once, model
+        helper caches the last one)."""
         img = self.renderer.render_state(self.state.detach())
         if self.dr is not None:
             img = self.dr(img)
+        if self.prev_frame is None:
+            self.prev_frame = img
+        obs = torch.cat((img, self.prev_frame), dim=1)
+        self.prev_frame = img
         r = self.imu.read(self.state)
         tilt = r["tilt"] * self.tilt_mask.unsqueeze(-1)
         vec = normalize_vec(r["gyro"], r["accel"], tilt, self.last_action)
-        return img, vec
+        return obs, vec
 
     # ------------------------------------------------------- expert data
     @torch.no_grad()
@@ -175,15 +183,16 @@ class HoverEnv:
 
     # ------------------------------------------------- student closed loop
     def policy_rollout(self, policy, H: int, h0=None, no_grad=False,
-                       with_expert=False):
+                       with_expert=False, with_feat=False):
         """Closed-loop rollout of the policy for H steps. Images/IMU always
         detached; dynamics differentiable unless no_grad. Everything lives on
         cfg.device (policy included). Returns (states, actions, final hidden)
-        or (…, expert_labels) when with_expert — per-step expert actions at
-        the *student-visited* states (DAgger-style labels; the expert's
-        integrator runs along the student trajectory)."""
+        [+ expert_labels if with_expert] [+ feats if with_feat].
+        Expert labels are per-step expert actions at the *student-visited*
+        states (DAgger-style; expert integrator runs along the student
+        trajectory). feats are [h2, z] per step for auxiliary heads."""
         h = policy.init_hidden(self.cfg.B, self.cfg.device) if h0 is None else h0
-        states, actions, labels = [], [], []
+        states, actions, labels, feats = [], [], [], []
         ctx = torch.no_grad() if no_grad else torch.enable_grad()
         with ctx:
             for _ in range(H):
@@ -192,14 +201,21 @@ class HoverEnv:
                     with torch.no_grad():
                         labels.append(self.expert(self.state.detach(),
                                                   self.tgt_p, self.tgt_yaw))
-                a, h = policy(img, vec, h)
+                if with_feat:
+                    a, h, f = policy(img, vec, h, return_feat=True)
+                    feats.append(f)
+                else:
+                    a, h = policy(img, vec, h)
                 self.state = self.dyn.step(self.state, a, self.params)
                 self.last_action = a.detach()
                 states.append(self.state)
                 actions.append(a)
+        out = [states, actions, h]
         if with_expert:
-            return states, actions, h, labels
-        return states, actions, h
+            out.append(labels)
+        if with_feat:
+            out.append(feats)
+        return tuple(out)
 
     # ------------------------------------------------------------- metrics
     @torch.no_grad()
