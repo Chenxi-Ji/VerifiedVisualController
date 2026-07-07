@@ -133,3 +133,28 @@ notes carried forward: (a) τ_ω DR upper bound 0.10 s may be unrealistically
 slow for PX4's rate loop — revisit with deployment numbers; (b) if the expert
 becomes the distillation teacher, keep the softened gains (a teacher that
 limit-cycles teaches limit cycles).
+
+## 2026-07-07 — render bridge (`pixel2ctbr/render_bridge.py`) ✅
+
+QuadState → batched low-res fisheye frames, replacing the legacy
+render-at-1024-then-CPU-resize path for training. Direct render at policy res
+with scaled K, `packed=True`, chunked ≤64/call, per-episode camera DR
+(intrinsics + mount as quaternion) folded in. Verification
+(`test_render_bridge.py`) caught two real issues:
+
+1. **CAM_AXES quaternion was wrong** (hand-guessed; maxdiff 2.0 vs the matrix).
+   Fixed with the value from `Rotation.from_matrix(CAM_AXES)` = (w,x,y,z)
+   (−.5,.5,.5,−.5); now exact to 0.
+2. **Aliasing gap vs deployed preprocessing**: direct low-res rendering skips
+   the box filter of the legacy 1024→256 INTER_LINEAR path — images
+   geometrically aligned to 0.1 px (phase correlation, response 0.85) but
+   0.042 mean|diff| of speckle. Old sim2real history (fix #2: byte-matched
+   preprocessing) says don't ship that gap. Fix: `supersample=2` — render 2×,
+   avg-pool 2×2 (≈free: throughput is projection-bound) → parity 0.0155.
+   **Deployment spec consequence: the new onboard preprocessing must use an
+   area-average resize (cv2 INTER_AREA), not INTER_LINEAR**, so the real
+   pipeline low-passes like the training images. Recorded for the model-helper
+   rewrite.
+
+Throughput at policy res (128×96, ss=2, chunk 64, RTX 5080): **295 img/s**.
+Budget math: distillation (~300 k frames) ≈ 17 min; SHAC/BPTT (1–10 M) ≈ 1–9 h.
