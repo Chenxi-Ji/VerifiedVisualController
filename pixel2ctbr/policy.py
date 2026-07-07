@@ -52,7 +52,12 @@ class PixelCTBRPolicy(nn.Module):
         self.img_proj = nn.Sequential(nn.Linear(120, 64), nn.ReLU())
         self.vec_mlp = nn.Sequential(nn.Linear(VEC_DIM, 32), nn.ReLU())
         self.gru = nn.GRUCell(64 + 32, hidden)
-        self.head = nn.Sequential(nn.Linear(hidden, 64), nn.ReLU(),
+        # head reads hidden state AND the current fused features (skip
+        # connection): rate control wants fresh visual feedback, memory
+        # serves estimation — routing everything through the GRU halved the
+        # lateral rate response (measured, 05 log). Matches Geles/GRaD-Nav
+        # actor designs (features + latent both feed the MLP).
+        self.head = nn.Sequential(nn.Linear(hidden + 64 + 32, 64), nn.ReLU(),
                                   nn.Linear(64, 4))
         # start near hover: zero the last layer so pre-clamp logits ~0 -> c≈G
         nn.init.zeros_(self.head[-1].weight)
@@ -75,7 +80,7 @@ class PixelCTBRPolicy(nn.Module):
         z = torch.cat((self.img_proj(self.features(image)),
                        self.vec_mlp(vec)), dim=-1)
         h2 = self.gru(z, h)
-        raw = self.head(h2)
+        raw = self.head(torch.cat((h2, z), dim=-1))
         c = C_CENTER + clamp_relu(raw[:, :1], 1.0) * C_SPAN
         rl = torch.tensor(RATE_LIM, device=raw.device)
         w = clamp_relu(raw[:, 1:] * rl, rl)

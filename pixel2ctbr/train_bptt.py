@@ -153,8 +153,27 @@ def main():
     env.seed(7)
     policy = PixelCTBRPolicy().to(DEV)
     if os.path.exists(args.init):
-        policy.load_state_dict(torch.load(args.init, weights_only=True)["model"])
-        print(f"warm start from {args.init}")
+        sd = torch.load(args.init, weights_only=True)["model"]
+        own = policy.state_dict()
+        kept = {k: v for k, v in sd.items()
+                if k in own and own[k].shape == v.shape}
+        missing = [k for k in own if k not in kept]
+        policy.load_state_dict(kept, strict=False)
+        # skip-connection graft: old head read only h (hidden); new head reads
+        # [h, z]. Copy old weights into the h-slice and zero the z-slice so
+        # the grafted policy behaves EXACTLY like the checkpoint at load, and
+        # training grows the skip from zero.
+        hk = "head.0.weight"
+        if hk in sd and hk in missing:
+            old_w = sd[hk]
+            with torch.no_grad():
+                policy.head[0].weight.zero_()
+                policy.head[0].weight[:, :old_w.shape[1]].copy_(old_w)
+                policy.head[0].bias.copy_(sd["head.0.bias"])
+            print(f"grafted {hk}: old {tuple(old_w.shape)} into h-slice of "
+                  f"{tuple(policy.head[0].weight.shape)}, skip-slice zeroed")
+        print(f"warm start from {args.init} ({len(kept)}/{len(own)} tensors; "
+              f"fresh: {missing})")
     else:
         print(f"WARNING: no init at {args.init} — cold start (expect divergence risk)")
     # BN frozen: stats were DR-calibrated in Phase A (04_design §4)
@@ -165,6 +184,7 @@ def main():
 
     opt = torch.optim.Adam(policy.parameters(), lr=args.lr)
     scale = torch.tensor([C_SPAN, *RATE_LIM], device=DEV)
+    bc_w = torch.tensor([1.0, 2.0, 2.0, 1.5], device=DEV)
     for ep in range(args.epochs):
         H = horizon_for_epoch(ep, args.epochs)
         t0 = time.time()
@@ -203,7 +223,10 @@ def main():
                 # (bootstrap-RL-with-IL); the expert's integrator runs along
                 # the whole chain, so its labels carry the integral-action
                 # signal the policy must reproduce via its hidden state
-                l_bc = sum(HUBER(a / scale, lb / scale)
+                # rates weighted 2x thrust: measured deficit is the lateral
+                # rate response (corr 0.3 at half the expert magnitude)
+                l_bc = sum((HUBER(a / scale, lb / scale, reduction="none")
+                            * bc_w).mean()
                            for a, lb in zip(actions, labels)) / len(actions)
                 loss = loss + 0.4 * l_bc
                 parts["bc"] = 0.4 * float(l_bc)
