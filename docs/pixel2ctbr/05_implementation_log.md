@@ -400,9 +400,24 @@ probe's ceiling** (0.124 vs 0.113 m).
 From run-9 end: BN refrozen (stats now adapted), cosine lr 6e-5→6e-6, all
 epochs H=32, evals every 2 epochs, **best-checkpoint-by-success saving**
 (run-9's ep-20 peak was overwritten by a worse final save — fixed).
-logs/bptt_polish.log. Remaining gap to the ≥95% gate is the fat tail
-(p95 ~0.7–1 m: a minority of episodes converge slowly or stall) + the strict
-composite criterion (err<0.15 m AND |v|<0.2 AND yaw<0.15 at t=8 s).
+logs/bptt_polish.log. Best: **75.5% success, 0.092 m median, p95 0.36 m,
+0 crashes** at epoch 4; stable 65–75% band thereafter.
+
+## 2026-07-07 — day-1 close-out
+
+- Definitive 512-episode eval + ablations: see 06_verification.md §B
+  (base 69.1% / 9.5 cm / 0 crashes; DR-off ≈ base ⇒ no twin-overfit;
+  graceful degradation on no-tilt / +latency / gain-edges).
+- Export: one more converter landmine — onnx2tf rejects channel-axis Slice
+  ops (the per-frame mean-sub); fixed with an export-time wrapper that
+  rebuilds the graph slice-free and permutes conv1 input channels to match
+  (numerically proven by the 1000-step parity: 5.4e-3). `pixel_ctbr.tflite`
+  264 KB.
+- Artifact: policy_rollout.mp4 (trained policy, DR'd plants, splat camera).
+- **Open to reach the 95% gate**: tail diagnosis (p95 44 cm — which start
+  pocket produces the slow episodes?), possibly +epochs / tail-weighted
+  chain sampling / terminal critic. Then the C-ladder (06) to hardware, and
+  the milestone-2 gate-trajectory extension (03 §path-to-gates).
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite

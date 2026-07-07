@@ -17,13 +17,31 @@ crossing step gets its own measured checkpoint.*
 | A7 | Full training loop mechanically sound | BC + BPTT smoke runs: collection 400 f/s, gradients flow, eval/save work |
 | A8 | Dynamics+bridge+expert cohere visually | `rollout_video.py`: 4-tile video, tilted horizons during transients, all tiles converge to canonical gate-centered hover view, 2–4.7 cm |
 
-## B. In progress
+## B. Training results (2026-07-07, definitive 512-episode eval)
 
-- B1: Phase A BC training at scale (logs/bc_run1.log) — gate: student-only
-  closed-loop ≥80% success.
-- B2: Phase B BPTT — gate: ≥95% success, 512-episode eval, full DR, plus
-  ablations (no-tilt, +1 delay step, thrust_gain edges, DR-off twin-overfit
-  check per legacy gate-swap lesson).
+- B1 ✅ Phase A BC+DAgger: 0.83 m median / 2% crash warm start (bc_run1.log).
+- B2 ◐ Phase B through 9 iterations + polish (full diagnosis chain in 05):
+  best checkpoint `weights/pixel_ctbr_final.pt`, eval_policy.py, 512
+  episodes × 8 s, full DR (`pixel2ctbr/eval_results.json`):
+
+  | condition | success | err_med | p95 | crash |
+  |---|---|---|---|---|
+  | **base** | **69.1%** | **9.5 cm** | 44.0 cm | 0.0% |
+  | no_tilt | 63.5% | 9.3 cm | 40.6 cm | 0.0% |
+  | delay +25 ms | 58.2% | 11.7 cm | 57.2 cm | 0.2% |
+  | thrust-gain edges | 62.1% | 11.5 cm | 51.7 cm | 0.0% |
+  | image-DR off | 70.1% | 9.7 cm | 54.9 cm | 0.0% |
+
+  Reading: median well inside the 15 cm radius; **DR-off ≈ base ⇒ no
+  twin-overfit** (legacy gate-swap smell absent); graceful degradation on
+  every ablation; zero crashes at 2560 episodes. **Gate (≥95% strict
+  composite) NOT yet met** — limiter is the slow-episode tail (p95 44 cm),
+  not the typical case. Tail diagnosis is the next training-side task.
+- Export ✅ `weights/pixel_ctbr.tflite` 264 KB fp16; 1000-step closed-loop
+  parity vs PyTorch: max action diff 5.4e-3 (≈0.06% of thrust span) — C1
+  passed on desktop (on-device TFLite-2.8 re-check pending, C2).
+- Artifact: `pixel2ctbr/spike_out/policy_rollout.mp4` (trained policy, 4
+  random DR'd plants, splat camera).
 
 ## C. Bench/hardware ladder (ordered gates; each blocks the next)
 
