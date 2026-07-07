@@ -144,6 +144,8 @@ def main():
     ap.add_argument("--windows", type=int, default=120)   # per epoch
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--out", default="weights/pixel_ctbr_bptt.pt")
+    ap.add_argument("--polish", action="store_true",
+                    help="final polish: BN frozen, cosine lr decay, H=32 only")
     args = ap.parse_args()
     if args.smoke:
         args.epochs, args.windows = 2, 4
@@ -191,7 +193,10 @@ def main():
     policy.train()
     for m in policy.modules():
         if isinstance(m, torch.nn.BatchNorm2d):
-            m.momentum = 0.01
+            if args.polish:
+                m.eval()          # stats adapted during v9; freeze for polish
+            else:
+                m.momentum = 0.01
 
     # auxiliary velocity head (train-time only, never exported): forces the
     # trunk+GRU to encode body velocity from the frame pair — the privileged-v
@@ -200,11 +205,14 @@ def main():
     aux_v = torch.nn.Linear(policy.hidden + 96, 3).to(DEV)
     opt = torch.optim.Adam(list(policy.parameters()) + list(aux_v.parameters()),
                            lr=args.lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=args.epochs, eta_min=args.lr * 0.1) if args.polish else None
+    best_succ = -1.0
     scale = torch.tensor([C_SPAN, *RATE_LIM], device=DEV)
     bc_w = torch.tensor([1.0, 2.0, 2.0, 1.5], device=DEV)
     from dynamics import quat_rotate_inv
     for ep in range(args.epochs):
-        H = horizon_for_epoch(ep, args.epochs)
+        H = 32 if args.polish else horizon_for_epoch(ep, args.epochs)
         t0 = time.time()
         agg = {}
         n_win = 0
@@ -266,12 +274,23 @@ def main():
                 agg["gn"] = agg.get("gn", 0.0) + float(gn)
         msg = " ".join(f"{k} {v/n_win:.4f}" for k, v in agg.items())
         print(f"epoch {ep+1}/{args.epochs} H={H} chain={CHAIN}  {msg}  ({time.time()-t0:.0f}s)")
-        if (ep + 1) % 4 == 0 or ep == args.epochs - 1:
+        if sched is not None:
+            sched.step()
+        if (ep + 1) % 2 == 0 or ep == args.epochs - 1:
             m = closed_loop_eval(env, policy)
+            if args.polish:
+                for mod in policy.modules():
+                    if isinstance(mod, torch.nn.BatchNorm2d):
+                        mod.eval()
             print(f"  eval: {m}")
             torch.save({"model": policy.state_dict(), "metrics": m, "epoch": ep},
-                       args.out)
-    print(f"saved {args.out}")
+                       args.out.replace(".pt", "_last.pt"))
+            if m["success"] > best_succ:      # keep the BEST, not the last
+                best_succ = m["success"]
+                torch.save({"model": policy.state_dict(), "metrics": m,
+                            "epoch": ep}, args.out)
+                print(f"  new best ({best_succ*100:.1f}%) -> {args.out}")
+    print(f"saved best={best_succ*100:.1f}% {args.out}")
 
 
 if __name__ == "__main__":
