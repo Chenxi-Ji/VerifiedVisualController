@@ -1,9 +1,10 @@
 # 01 — Research Report: Pixels(+IMU) → CTBR for Quadrotors
 
-*2026-07-07. Compiled from a five-thread research fan-out (anchor-paper deep dive,
-literature sweep, training-infrastructure survey, Starling 2 / PX4 deployment
-research, local repo audit). Every load-bearing claim carries a source. Sections
-marked ⏳ are awaiting a research thread still in flight and will be filled in.*
+*2026-07-07. Compiled from a five-thread research fan-out (anchor-paper deep
+dive, literature sweep, training-infrastructure survey, Starling 2 / PX4
+deployment research, local repo audit) plus direct primary-source reads
+(Swift Nature PDF). Every load-bearing claim carries a source; items a
+timed-out sweep couldn't verify are marked [UNVERIFIED] inline.*
 
 ---
 
@@ -178,13 +179,102 @@ attitude dynamics. Fix catalog with provenance:
 - value-auxiliary + visited-state inits — ABPT (VisFly-Lab, 2603.21123);
 - first-order motor-lag smoothing — GRaD-Nav, Heeg.
 
-## 3. Literature sweep: vision-to-low-level-control across groups ⏳
+## 3. The broader vision-to-control lineage
 
-*(Thread still in flight — teacher–student lineage (Deep Drone Acrobatics,
-Learning High-Speed Flight in the Wild), Swift's architecture and why it kept
-VIO+gate-detector instead of raw pixels, IBVS/optical-flow hover, nano-drone
-works, and the 2024–2026 frontier. Will be merged here with per-paper
-obs/action/rate/code tables and lessons.)*
+*(Primary sources: Swift read directly from the Nature PDF; teacher–student
+and diff-sim entries cross-referenced from the §1/§2 threads. A wider
+agent-driven sweep was cut short by rate-limit/timeout issues; the entries
+here are the load-bearing ones for our design.)*
+
+### Swift — Kaufmann et al., Nature 620:982 (2023), read from the paper
+
+The strongest existing datapoint for *CTBR policies on real hardware at the
+limit*, and the clearest argument about where to put the sim2real burden:
+
+- **Perception is an abstraction, not pixels**: VIO at 100 Hz + a CNN
+  gate-corner detector at 30 Hz; corners → 3D gate pose via camera
+  resectioning + a track map; fused with VIO in a **Kalman filter**.
+- **Policy is tiny**: 2-layer MLP (2×128), input = filtered state + previous
+  action, output = **collective thrust + body rates at 100 Hz** — "the same
+  control modality that the human pilots use." All onboard (Jetson-class
+  computer on the Agilicious platform; total sensorimotor latency 40 ms vs
+  ~220 ms for human champions).
+- **Sim2real by empirical residuals, not just DR**: perception residuals
+  modeled as **Gaussian processes**, dynamics residuals by **k-NN
+  regression**, both *fit from real flight data* recorded under mocap; the
+  policy is then fine-tuned in the residual-augmented sim. The authors state
+  perception residuals were stochastic while dynamics residuals were largely
+  deterministic.
+- Reward includes a **perception term (keep the next gate in the camera
+  FOV)** — the same term reappears in Geles 2024; vision-in-the-loop policies
+  need to be *taught* to protect their own observability.
+- Stated brittleness: "Swift's perception system assumes that the appearance
+  of the environment is consistent with what was observed during training;
+  if this assumption fails, the system can fail." Even with an abstraction,
+  appearance robustness bounded the system — motivating (a) their detector's
+  training-set diversity and (b) our heavy image DR.
+
+**Lessons for us**: CTBR at policy level is proven on hardware at 100 Hz
+onboard; previous-action input and perception-aware rewards are standard;
+and the *residual-fitting* recipe (fit GP/kNN residuals from real logs, then
+fine-tune in-sim) is the natural phase-2 of our sim2real plan once first
+flights produce logs — it slots exactly into our existing
+mocap-as-measurement pipeline.
+
+### Teacher–student sensorimotor policies (the S2 lineage)
+
+- **Deep Drone Acrobatics** (Kaufmann et al., RSS 2020, arXiv 2006.05768):
+  privileged MPC teacher → student on **abstracted vision (feature tracks) +
+  IMU**; abstraction chosen explicitly because raw-pixel students transferred
+  poorly; acrobatic maneuvers at the platform limit, zero-shot.
+- **Learning High-Speed Flight in the Wild** (Loquercio et al., Science
+  Robotics 2021, arXiv 2110.05113): privileged teacher → student on **depth +
+  state**, trained entirely in sim (Flightmare renders), zero-shot to forests
+  at 10 m/s; outputs receding-horizon trajectories (not CTBR) tracked by a
+  classical controller. The canonical existence proof that *simulation-only
+  vision training transfers* when the observation is chosen well.
+- **Bootstrapping RL with IL for vision-based agile flight** (Xing et al.,
+  arXiv 2403.12203): BC warm start + RL fine-tune beats either alone for
+  vision policies — the exact Phase-A/Phase-B composition we adopted (and
+  our Phase-B divergence-then-anchor experience empirically reproduced its
+  premise).
+- **SOUS VIDE / FalconGym** (§2.1): the same pattern executed inside splats.
+
+### Differentiable-sim CTBR (the S5 lineage)
+
+- **Heeg, Song, Scaramuzza** (ICRA 2025, arXiv 2410.15979, code
+  rpg_flightning): BPTT through dynamics + differentiable camera on **visual
+  features → CTBR at 50 Hz**, minutes of training, real hand-throw recovery.
+- **Wiedemann et al. APG** (ICRA 2023, arXiv 2209.13052, code
+  lis-epfl/apg_trajectory_tracking): BPTT beats model-free on tracking with
+  10× less compute; stability via curriculum — convergent with our legacy
+  trainer's design.
+- **GRaD-Nav / D.Va / SHAC / AHAC** (§2.2, §2.6): the stability catalog.
+
+### Classical no-pose visual stabilization (context; none output CTBR)
+
+- **IBVS for hover** (Hamel & Mahony 2002 line): image-moment/spherical-
+  projection servoing with attitude from IMU — proves gate-relative hover is
+  observable from image features + tilt alone, but assumes an inner velocity
+  or attitude loop and known feature geometry; brittle to appearance.
+- **Optical-flow landing/hover** (de Croon et al., bee-inspired): flow
+  divergence regulates descent/hover without metric state; known oscillation
+  instability near touchdown (the flow-gain/height ambiguity) — an argument
+  for learned policies with memory over fixed-gain flow laws.
+- Nano-drone CNN works (PULP-Dronet etc.) do steering classes, not
+  closed-loop thrust/rate control — not load-bearing here.
+
+### 2024–2026 frontier (beyond §2.1's splat-training entries)
+
+- **Dream to Fly** (arXiv 2501.14377): model-based RL from raw pixels for
+  drone flight — the UZH answer to sample cost; world model instead of
+  abstraction. [Real-flight specifics UNVERIFIED in our sweep.]
+- **MonoRace** (TU Delft, arXiv 2601.15222): mono camera + IMU → **direct
+  motor commands onboard**, won the 2025 A2RL race — the most aggressive
+  onboard end-to-end design point publicly known. [venue details UNVERIFIED]
+- **Multi-task quadrotor RL** (arXiv 2412.12442): one policy for
+  stabilization + tracking + racing via multi-critic — relevant to our
+  milestone-2 extension pattern.
 
 ## 4. Starling 2 / PX4 deployment facts (verified against pinned sources)
 
@@ -274,7 +364,7 @@ verification passes; every load-bearing claim 2–3 independent confirmations.*
   counter-evidence: SOUS VIDE flew CTBR at 20 Hz, E2E-Fly at 30 Hz; our 40 Hz
   target with delay-in-training is defensible.
 
-## 5. Synthesis (updated as threads land)
+## 5. Synthesis
 
 1. **Pixels+IMU→CTBR trained in our splat is not a research bet; it is a
    reproduction** of GRaD-Nav/SOUS VIDE with a better-calibrated camera model
