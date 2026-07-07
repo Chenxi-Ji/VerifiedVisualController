@@ -338,7 +338,39 @@ weights copied into the h-slice, skip-slice zeroed; zero-init graft
 collapsed to open-loop hover in smoke, 96% crash — the exact-behavior graft
 starts at run-5 level 0.57 m). Anchor made per-channel with rates ×2
 (targets the measured deficit). Run 7 = v7 from the run-5 snapshot
-(logs/bptt_run7.log).
+(logs/bptt_run7.log). Epoch-4 eval: 0.67 m — same plateau.
+
+## 2026-07-07 — THE ROOT CAUSE: velocity information (privileged probe)
+
+Ablations killed the remaining suspects: IMU biases zeroed + image DR off
+moved the orbit only 0.55→0.47 m — the floor is not observation corruption.
+First-principles re-derivation: the legacy image→velocity-command controller
+never needed to KNOW velocity (its plant integrated commands); a CTBR policy
+must implement the damping term (expert's k_d·v) and can only get v by
+remembering previous-frame features through the 96-d GRU bottleneck.
+
+**Decisive probe** (`probe_priv_velocity.py`): append privileged true body
+velocity to the proprio vector (sim-only), same recipe, same run-5 init,
+8 epochs: 0.53 → 0.39 → 0.40 → 0.31 → 0.20 → 0.164 → **0.142 → 0.113 m
+median, 65% strict success, p95 0.32 m, zero crashes** — smashes through the
+0.55–0.7 m plateau that seven training-side interventions couldn't dent, and
+was still improving at cutoff. Velocity information IS the bottleneck.
+
+## 2026-07-07 — v8: two-frame input + auxiliary velocity head (run 8)
+
+Deployable version of the same information:
+- **Input = [current, previous] grayscale frames** (visual velocity by frame
+  differencing; conv1 2→4 channels with per-frame [raw, raw−mean] pairs).
+  Onboard cost: the model helper caches one preprocessed frame. Graft: old
+  conv1 weights into the current-frame channels, previous-frame channels
+  zeroed ⇒ load-time behavior identical to run 5 again.
+- **Auxiliary velocity head** (train-time only, Linear on [h,z] → body v/2,
+  Huber vs true pre-step velocity, weight 0.5; never exported): forces the
+  trunk+GRU to actually extract velocity — the probe proved that's the
+  convergent representation. Env DRs each frame once and reuses it as
+  `previous` (exactly the deployment pipeline's behavior).
+- Run 8: 28 epochs × 100 windows from the run-5 snapshot
+  (logs/bptt_run8.log). Target: approach the probe's 0.113 m ceiling.
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
