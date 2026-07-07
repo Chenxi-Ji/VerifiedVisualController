@@ -67,6 +67,16 @@ def window_loss(env: HoverEnv, states, actions):
         a_n = torch.cat((((a[:, :1] - G) / C_SPAN),
                          a[:, 1:] / torch.tensor(RATE_LIM, device=DEV)), dim=-1)
         l_act = l_act + (a_n ** 2).mean() * 0.02
+        # perception term (transit task, approach phase only): keep the gate
+        # near the optical axis while it is still ahead — Swift/Geles reward;
+        # phase-B drones are past the gate (nothing to see), masked out
+        if hasattr(env, "phase_b"):
+            bearing = torch.atan2(-s.p[:, 1], -s.p[:, 0])
+            yaw_s, _, _ = euler_zyx_from_quat(s.q)
+            berr = torch.atan2(torch.sin(bearing - yaw_s),
+                               torch.cos(bearing - yaw_s))
+            mask = (~env.phase_b).float()
+            l_att = l_att + 0.5 * (mask * torch.relu(berr.abs() - 0.35) ** 2).mean()
         if prev_a is not None:
             l_jerk = l_jerk + ((a - prev_a) ** 2).mean() * 0.002
         prev_a = a
@@ -152,12 +162,18 @@ def main():
     ap.add_argument("--out", default="weights/pixel_ctbr_bptt.pt")
     ap.add_argument("--polish", action="store_true",
                     help="final polish: BN frozen, cosine lr decay, H=32 only")
+    ap.add_argument("--task", choices=["hover", "transit"], default="hover",
+                    help="transit = milestone-2 gate-transit (GateTransitEnv)")
     args = ap.parse_args()
     if args.smoke:
         args.epochs, args.windows = 2, 4
 
     torch.manual_seed(0)
-    env = HoverEnv(EnvConfig(B=48))
+    if args.task == "transit":
+        from env_transit import GateTransitEnv
+        env = GateTransitEnv(EnvConfig(B=48))
+    else:
+        env = HoverEnv(EnvConfig(B=48))
     env.seed(7)
     policy = PixelCTBRPolicy().to(DEV)
     if os.path.exists(args.init):
@@ -289,9 +305,20 @@ def main():
         if sched is not None:
             sched.step()
         if (ep + 1) % 2 == 0 or ep == args.epochs - 1:
-            m = closed_loop_eval(env, policy)              # 8 s (the gate)
-            m12 = closed_loop_eval(env, policy, T=480, resets=2)
-            print(f"  eval12s: {m12}")
+            if args.task == "transit":
+                # transit metrics: crossing quality + exit hover, 13 s
+                policy.eval()
+                ms = []
+                for _ in range(3):
+                    env.reset()
+                    env.policy_rollout(policy, 520, no_grad=True)
+                    ms.append(env.transit_metrics())
+                policy.train()
+                m = {k: sum(x[k] for x in ms) / len(ms) for k in ms[0]}
+            else:
+                m = closed_loop_eval(env, policy)          # 8 s (the gate)
+                m12 = closed_loop_eval(env, policy, T=480, resets=2)
+                print(f"  eval12s: {m12}")
             if args.polish:
                 for mod in policy.modules():
                     if isinstance(mod, torch.nn.BatchNorm2d):

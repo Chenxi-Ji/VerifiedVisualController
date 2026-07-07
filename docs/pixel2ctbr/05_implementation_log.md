@@ -454,6 +454,31 @@ uncommitted ctrl_lya edits untouched):
   v1 limitations. First gate C1 = on-device build + tensor-discovery check
   (cannot compile here — needs voxl-cross + TFLite 2.8 headers).
 
+## 2026-07-07 (later) — "whatever can be coded now" batch
+
+1. **Onboard tilt** (Starling2 `38bd33b`): complementary filter (gyro
+   propagate + accel-gravity correct, 1 g-gated) inside the helper's IMU
+   thread fills the tilt vec slots — removes the v1 zeroed-tilt limitation
+   (~5 pt sim ablation cost). Env knobs `PIXEL_CTBR_TILT[_GAIN]`. Sign
+   conventions derived for FRD/z-down and matched to the sim's tilt model.
+2. **plot_flight.py CTBR support**: auto-detects ctbr_offboard.py logs
+   (`c_ms2` header), new 3-panel actions plot (thrust vs hover-g line /
+   body rates + hover-hold marks / sent °/s + thrust01). Verified on a
+   synthetic log end-to-end.
+3. **Milestone-2 v0 scaffolding** (`env_transit.py` + trainer wiring):
+   GateTransitEnv — phase machine (approach wp → commit gate: centered
+   <0.12 m, lateral |v|<0.2, yaw<0.12 → exit hover 0.8 m past the plane),
+   per-step plane-crossing detection (through-opening vs frame-strike),
+   phase-aware `tgt_p` property that transparently retargets the existing
+   expert/losses. Splat-validity constraint documented (short overshoot;
+   -y face unlearnable). **Expert oracle: first cut 85.9% with 13.7%
+   frame-strikes (commit gate on position only → drift over the runway);
+   tightened commit gate + shorter runway → 100% success, 100% clean
+   crossings, 0.2 cm median exit error (B=256, 13 s).** train_bptt gains
+   `--task transit` (transit eval = crossing quality + exit hover at 13 s)
+   and a Swift/Geles perception term (keep gate near optical axis, approach
+   phase only). Training run pends GPU (v12 in flight).
+
 ## 2026-07-07 — day-1 close-out
 
 - Definitive 512-episode eval + ablations: see 06_verification.md §B
