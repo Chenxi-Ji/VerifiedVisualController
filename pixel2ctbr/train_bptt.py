@@ -27,6 +27,8 @@ BURN = 6          # unscored GRU warm-up steps at chain start
 CHAIN = 13        # scored windows per episode chain (13 x 32 steps at
                   # dt=0.025 = 10.4 s — covers the slow-convergence regime
                   # the 8-16 s probe exposed (tail diagnosis, 05 log))
+RING_W = 0.0      # soft time-outside-ring weight; RAMPED per epoch by main()
+                  # (abrupt introduction shocked v11/v12 ~15 pts at low lr)
 
 
 def window_loss(env: HoverEnv, states, actions):
@@ -51,14 +53,17 @@ def window_loss(env: HoverEnv, states, actions):
         # soft time-outside-ring: the differentiable version of the gate's
         # position criterion itself — bills every step spent outside 0.15 m,
         # pressuring convergence SPEED (tail diagnosis: success 71%@8s vs
-        # 86%@16s — the tail is slow, not lost)
-        l_pos = l_pos + wt * 1.5 * torch.sigmoid((en - 0.15) / 0.04).mean()
+        # 86%@16s — the tail is slow, not lost). Weight ramped by main().
+        l_pos = l_pos + wt * RING_W * torch.sigmoid((en - 0.15) / 0.04).mean()
         near = torch.exp(-en.detach())                     # damp v near target
         spd = s.v.norm(dim=-1)
+        # distance-scaled speed allowance: fast APPROACH is fine (cap ~2.4
+        # m/s at 2+ m out), tight near the ring (~1.2 m/s) — the flat 1.5
+        # cap was billing transit speed and slowing arrival (v13)
+        cap = 1.2 + 0.6 * en.detach().clamp(max=2.0)
         l_vel = l_vel + wt * (near * spd.clamp(max=5.0) ** 2).mean() * 0.5 \
-            + (torch.relu(spd - 1.5) ** 2).mean() * 0.3    # global overspeed:
-        # short windows otherwise reward sprinting at the target — kinetic
-        # energy at window end is free (the epoch-4 divergence, 05 log)
+            + (torch.relu(spd - cap) ** 2).mean() * 0.3
+        # (overspeed still guards the sprint-divergence failure, 05 log)
         yaw, pitch, roll = euler_zyx_from_quat(s.q)
         yerr = 1.0 - torch.cos(yaw - env.tgt_yaw)
         tilt_pen = (torch.relu(pitch.abs() - 0.44) ** 2
@@ -164,6 +169,8 @@ def main():
                     help="final polish: BN frozen, cosine lr decay, H=32 only")
     ap.add_argument("--task", choices=["hover", "transit"], default="hover",
                     help="transit = milestone-2 gate-transit (GateTransitEnv)")
+    ap.add_argument("--ring-w", type=float, default=1.0,
+                    help="final time-outside-ring weight (ramped in over 6 ep)")
     args = ap.parse_args()
     if args.smoke:
         args.epochs, args.windows = 2, 4
@@ -235,6 +242,8 @@ def main():
     from dynamics import quat_rotate_inv
     for ep in range(args.epochs):
         H = 32 if args.polish else horizon_for_epoch(ep, args.epochs)
+        global RING_W
+        RING_W = args.ring_w * min(1.0, ep / 6.0)   # ramp over 6 epochs
         t0 = time.time()
         agg = {}
         n_win = 0
