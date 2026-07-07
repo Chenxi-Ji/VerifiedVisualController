@@ -282,6 +282,35 @@ Three fixes stacked on v3, each tied to a measured run-3 symptom:
    gradient that bypasses the plant; bootstrap-RL-with-IL pattern.
 3. **clip 1.0→5.0, lr→1e-4** — run-3 grads sat at 2–5 so every update was
    clipped to direction-only at ~¼ the nominal step.
+
+**Run-4 outcome**: crashes ~solved (17.7%→0.5% by epoch 8) but median err
+*rose* to 6.1 m — "safe but lost". Live diagnostic (16-drone probe with
+per-timestep bearing/altitude/thrust stats) showed the real mechanism: NOT
+gate blindness (blind fraction 0–6% throughout) but **slow vertical drift**
+— z_med −0.69 m at t=3 s → −4.3 m at t=6 s at |v| under the 1.5 m/s penalty
+cap with thrust pinned ≈9.2 m/s². Constant small thrust bias + drift slow
+enough that *no loss term at 0.4–0.8 s windows can see it*: over one window
+it costs centimeters of Huber; over a 6 s eval it compounds to 4 m. The
+policy needs INTEGRAL action (same conclusion as the expert experiment:
+PD 27% → PID 99%), and integral behavior is only learnable when training
+exhibits the *integrated* error.
+
+## 2026-07-07 — Phase B v5: episode-chained windows (run 5)
+
+Fix: each training episode = fresh reset + **CHAIN=10 consecutive scored
+windows**, state AND GRU hidden carried (detached) between windows = 4–8 s
+of continuous on-policy flight per chain. Drift accumulates along the chain
+exactly as at eval (chains start from rest, matching eval distribution by
+construction); late-chain windows see and bill the integrated offset;
+gradients stay window-local (BPTT stability preserved); the recurrent state
+trains on multi-second histories (integral action learnable). Replaces the
+visited-state buffer entirely; burn-in only at chain start; expert anchor
+raised to λ=0.4 (its integrator runs along the whole chain, carrying exactly
+the integral-action signal). Render cost per scored step unchanged.
+
+Smoke (2 epochs): eval 0.72 m median / 0.5% crash — **first configuration to
+improve on the 0.83 m warm start**, and chain losses show drift being billed
+(vel/term terms large in late windows). Full run: logs/bptt_run5.log.
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
