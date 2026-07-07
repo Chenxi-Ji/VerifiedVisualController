@@ -104,3 +104,32 @@ Findings:
 
 **Design consequence: recurrence is allowed.** Frame-stack vs GRU is now a pure
 learning/sim2real question, not an export question.
+
+## 2026-07-07 — geometric hover expert + plant-feasibility gate ✅
+
+`pixel2ctbr/expert.py` — Lee/Mellinger-style cascade: position PID → desired
+specific force → desired tilt+yaw attitude + collective → attitude-error P →
+rate commands. Privileged sim state (p,v,q), but deliberately blind to the
+per-episode actuator params (thrust_gain, τ's, delay). Roles: feasibility oracle
+now, teacher candidate for distillation, debugging baseline forever.
+
+Iteration story (each step measured, `pixel2ctbr/test_expert.py`, B=256
+randomized plants, start box from the old project, 40 Hz):
+1. PD-only: **27.3%** success, median err 17 cm, zero crashes. Diagnosis:
+   steady-state offset = thrust_gain error × G / kp ≈ 37 cm worst case — a PD
+   loop cannot reject the ±15% thrust-map DR. **Transferable lesson: any policy
+   on this plant needs integral action / adaptation; for the learned policy
+   that is exactly what recurrence provides (hidden state can estimate the
+   thrust residual from observed accel).**
+2. + position-error integrator (ki 1.5, anti-windup ±2): **94.1%**, median
+   1.1 cm — but stuck tail. Diagnosed via param correlation: failures cluster at
+   τ_ω≈0.09–0.10 s AND delay≈95 ms (≈200 ms combined lag) with katt=8 →
+   bounded ~12 cm limit cycle, never a crash.
+3. Softened gains (kp 3.5, kd 3.2, katt 5.5): **99.2%**, median 0.2 cm, worst
+   7.3 cm, 0 crashes, 95th pct 0.8 cm at 8 s.
+
+Verdict: control problem GREEN across the whole DR box at 40 Hz. Two design
+notes carried forward: (a) τ_ω DR upper bound 0.10 s may be unrealistically
+slow for PX4's rate loop — revisit with deployment numbers; (b) if the expert
+becomes the distillation teacher, keep the softened gains (a teacher that
+limit-cycles teaches limit cycles).
