@@ -111,7 +111,7 @@ def train_epochs(policy, data, epochs, chunk=32, burn_in=8, bs=24, lr=3e-4,
 
 
 @torch.no_grad()
-def closed_loop_eval(env: HoverEnv, policy, T=240, resets=4):
+def closed_loop_eval(env: HoverEnv, policy, T=320, resets=4):
     policy.eval()
     ms = []
     for _ in range(resets):

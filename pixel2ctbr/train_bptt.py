@@ -40,7 +40,14 @@ def window_loss(env: HoverEnv, states, actions):
         wt = 0.5 + 1.5 * (t + 1) / T                       # time-increasing
         e_p = s.p - env.tgt_p
         l_pos = l_pos + wt * HUBER(e_p, zero3)
-        near = torch.exp(-(e_p.detach().norm(dim=-1)))     # damp v near target
+        # near-target precision regime (legacy trainer's "V<=0.02: push V^2->0"
+        # analogue): Huber's gradient shrinks linearly with error, so at ~0.5 m
+        # the pull no longer beats the act/jerk regularizers + DR noise floor —
+        # run-5 orbited the target at 0.4-0.6 m forever (05 log). This term
+        # keeps the pressure on inside 1 m.
+        en = e_p.norm(dim=-1)
+        l_pos = l_pos + wt * 3.0 * (torch.exp(-en / 0.4) * en ** 2).mean()
+        near = torch.exp(-en.detach())                     # damp v near target
         spd = s.v.norm(dim=-1)
         l_vel = l_vel + wt * (near * spd.clamp(max=5.0) ** 2).mean() * 0.5 \
             + (torch.relu(spd - 1.5) ** 2).mean() * 0.3    # global overspeed:
@@ -172,8 +179,19 @@ def main():
         # losses). Replaces the visited-state buffer entirely (chain states
         # are on-policy and current by construction).
         chains = max(1, args.windows // CHAIN)
-        for _ in range(chains):
+        for ci in range(chains):
             env.reset()
+            if ci % 3 == 2:
+                # fine-approach chains: start settled near the target so the
+                # terminal-precision regime gets concentrated training signal
+                # (the start box almost never samples it)
+                B = env.cfg.B
+                env.state.p = env.tgt_p + torch.randn(B, 3, device=DEV) * 0.3
+                env.state.v = torch.randn(B, 3, device=DEV) * 0.15
+                yaw = env.tgt_yaw + torch.randn(B, device=DEV) * 0.15
+                from dynamics import quat_from_euler_zyx
+                env.state.q = quat_from_euler_zyx(
+                    yaw, torch.zeros(B, device=DEV), torch.zeros(B, device=DEV))
             env.expert.reset()
             _, _, h = env.policy_rollout(policy, BURN, no_grad=True)
             for c in range(CHAIN):
