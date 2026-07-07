@@ -211,6 +211,21 @@ Full verified report merged into 01_research_report §4. Consequences applied:
   delegate) + bench ladder.
 - `pixel2ctbr/eval_policy.py` — 512-episode gate + ablations (no-tilt,
   delay+1, gain-edges, DR-off overfit check).
+
+## 2026-07-07 — Phase A results (logs/bc_run1.log, weights/pixel_ctbr_bc.pt)
+
+307 k frames (30×64×160, OLD harder DR ranges), 8 epochs, 2 DAgger rounds:
+- **Pure BC: textbook compounding-error catastrophe** — bc_loss →0.0000 while
+  closed-loop = 0% success, median err 35 m, 98% crash. (Training loss near
+  zero + closed-loop failure = distribution shift, exactly the S2 weakness
+  called out in 03_strategy.)
+- **DAgger cures it order-of-magnitude per round**: round 1 → median 1.92 m,
+  15% crash; round 2 → **median 0.83 m, p95 2.2 m, 2% crash** (success
+  metric still 0% — threshold is 15 cm).
+- Verdict: sane warm start achieved; the residual (~0.8 m hover bias, no
+  tight convergence) is the imitation-gap residue Phase B's closed-loop
+  objective targets. Phase B launched from these weights with the corrected
+  DR ranges (logs/bptt_run1.log).
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
