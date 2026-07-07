@@ -102,14 +102,17 @@ class EnvConfig:
 
 
 class HoverEnv:
-    def __init__(self, cfg: EnvConfig, renderer: SplatRenderer | None = None,
-                 image_dr: bool = True):
+    def __init__(self, cfg: EnvConfig, renderer=None, image_dr: bool = True):
+        """renderer: SplatRenderer to share, None to build one, or False for
+        a state-only env (expert oracles / dynamics tests — observe() then
+        must not be called)."""
         self.cfg = cfg
         self.dyn = QuadCTBRDynamics(dt_ctrl=cfg.dt_ctrl, n_sub=cfg.n_sub)
-        self.renderer = renderer or SplatRenderer(
-            width=cfg.width, height=cfg.height, device=cfg.device,
-            mount_jitter_rad=0.5 * torch.pi / 180, intrinsics_jitter=1.0,
-            gray=True, supersample=2)
+        self.renderer = None if renderer is False else (
+            renderer or SplatRenderer(
+                width=cfg.width, height=cfg.height, device=cfg.device,
+                mount_jitter_rad=0.5 * torch.pi / 180, intrinsics_jitter=1.0,
+                gray=True, supersample=2))
         self.dr = GrayDomainRandomizer() if image_dr else None
         self.expert = GeometricHoverExpert(dt=cfg.dt_ctrl)
         B, dev = cfg.B, cfg.device
@@ -143,9 +146,10 @@ class HoverEnv:
         self.last_action[:, 0] = G
         self.tilt_mask = (torch.rand(B, generator=g) > cfg.tilt_dropout).float().to(dev)
         self.expert.reset()
-        self.renderer.sample_episode_dr(
-            B, g=torch.Generator(device=dev).manual_seed(
-                int(torch.randint(1 << 30, (1,), generator=g))))
+        if self.renderer is not None:
+            self.renderer.sample_episode_dr(
+                B, g=torch.Generator(device=dev).manual_seed(
+                    int(torch.randint(1 << 30, (1,), generator=g))))
         self.frame_ring = []     # primed on first observe()
         return self.state
 
