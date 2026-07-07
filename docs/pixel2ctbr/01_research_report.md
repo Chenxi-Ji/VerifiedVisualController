@@ -364,6 +364,35 @@ verification passes; every load-bearing claim 2–3 independent confirmations.*
   counter-evidence: SOUS VIDE flew CTBR at 20 Hz, E2E-Fly at 30 Hz; our 40 Hz
   target with delay-in-training is defensible.
 
+## 4b. Cross-check: the group's own platform (Gen-Drone-Racing-Research, local)
+
+*(Added 2026-07-07 after mining the professor's repo + branches — the
+FalconGym group's research platform. Full agent report in session log;
+verdicts:)*
+
+- **Sim-only**: no Starling/VOXL/PX4/MAVSDK/TFLite code on any of 14
+  branches; hardware deployment is our own ground to break (consistent with
+  the deployment thread's "no prior art for onboard-NN→CTBR on VOXL2").
+- **Command-path cross-check ✓**: their AIGP branch's offboard CTBR loop
+  uses SET_ATTITUDE_TARGET `type_mask=128`, rates rad/s FRD, thrust 0–1 —
+  identical to our ctbr_offboard.py plan (via pymavlink instead of MAVSDK),
+  with no failsafe machinery (ours has the ladder).
+- **Plant cross-check ✓**: their high-fidelity AIGP model uses motor
+  first-order lag τ=0.03 s, DR τ∈[0.01,0.06] s (ours 0.010–0.045), plant DR
+  as the explicit sim2real strategy (mass ±40%, k_w ±35%); their main-branch
+  model has NO motor lag/delay/drag. Neither branch models transport delay
+  or IMU noise (their docs flag exact-IMU "flattery") — our plant is
+  strictly richer where sim2real bites.
+- **PixelPilot thread** (their pixels→CTBR line): Geles-style 84×84
+  analytic gate-mask + asymmetric PPO; solved in-sim, but **0% zero-shot on
+  realistic detector masks; IoU-matched DR failed** (their M2/M3 findings) —
+  the representation gap between idealized and real perception is
+  structural. Validates our train-on-photoreal-renders choice: we carry
+  only the splat-vs-reality gap the legacy project already crossed.
+- **Adoptable for milestone 2**: their render-free projected gate-mask
+  (<100 µs/frame) as a cheap RL pretraining stage before splat fine-tuning;
+  their SE3→CTBR reference generator; their gate-count metric-bug warning.
+
 ## 5. Synthesis
 
 1. **Pixels+IMU→CTBR trained in our splat is not a research bet; it is a
