@@ -92,6 +92,9 @@ class EnvConfig:
     width: int = 128
     height: int = 96
     tilt_dropout: float = 0.2
+    frame_gap: int = 6      # pair current frame with frame(t - gap): 150 ms
+    # baseline makes hover-speed visual motion 1.5-4 px (consecutive frames
+    # at 40 Hz differ sub-pixel — unlearnable; 05 log run-8 finding)
     device: str = "cuda"
     # start box (scene units where noted; converted to meters inside)
     target_u = (0.0, 1.5, 0.0)
@@ -143,7 +146,7 @@ class HoverEnv:
         self.renderer.sample_episode_dr(
             B, g=torch.Generator(device=dev).manual_seed(
                 int(torch.randint(1 << 30, (1,), generator=g))))
-        self.prev_frame = None   # primed on first observe()
+        self.frame_ring = []     # primed on first observe()
         return self.state
 
     # ------------------------------------------------------------- obs
@@ -156,10 +159,10 @@ class HoverEnv:
         img = self.renderer.render_state(self.state.detach())
         if self.dr is not None:
             img = self.dr(img)
-        if self.prev_frame is None:
-            self.prev_frame = img
-        obs = torch.cat((img, self.prev_frame), dim=1)
-        self.prev_frame = img
+        if not self.frame_ring:
+            self.frame_ring = [img] * self.cfg.frame_gap
+        obs = torch.cat((img, self.frame_ring[0]), dim=1)
+        self.frame_ring = self.frame_ring[1:] + [img]
         r = self.imu.read(self.state)
         tilt = r["tilt"] * self.tilt_mask.unsqueeze(-1)
         vec = normalize_vec(r["gyro"], r["accel"], tilt, self.last_action)

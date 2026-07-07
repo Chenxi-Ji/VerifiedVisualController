@@ -185,11 +185,13 @@ def main():
               f"fresh: {missing})")
     else:
         print(f"WARNING: no init at {args.init} — cold start (expect divergence risk)")
-    # BN frozen: stats were DR-calibrated in Phase A (04_design §4)
+    # BN unfrozen with slow momentum: the two-frame input changed the trunk's
+    # input distribution, so Phase-A stats are stale (run-8 finding); slow
+    # momentum keeps deployment stats stable while letting them track
     policy.train()
     for m in policy.modules():
         if isinstance(m, torch.nn.BatchNorm2d):
-            m.eval()
+            m.momentum = 0.01
 
     # auxiliary velocity head (train-time only, never exported): forces the
     # trunk+GRU to encode body velocity from the frame pair — the privileged-v
@@ -266,10 +268,6 @@ def main():
         print(f"epoch {ep+1}/{args.epochs} H={H} chain={CHAIN}  {msg}  ({time.time()-t0:.0f}s)")
         if (ep + 1) % 4 == 0 or ep == args.epochs - 1:
             m = closed_loop_eval(env, policy)
-            # closed_loop_eval sets BN modules back via policy.train(); re-freeze
-            for mod in policy.modules():
-                if isinstance(mod, torch.nn.BatchNorm2d):
-                    mod.eval()
             print(f"  eval: {m}")
             torch.save({"model": policy.state_dict(), "metrics": m, "epoch": ep},
                        args.out)
