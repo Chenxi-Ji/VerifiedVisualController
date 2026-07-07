@@ -311,6 +311,34 @@ the integral-action signal). Render cost per scored step unchanged.
 Smoke (2 epochs): eval 0.72 m median / 0.5% crash — **first configuration to
 improve on the 0.83 m warm start**, and chain losses show drift being billed
 (vel/term terms large in late windows). Full run: logs/bptt_run5.log.
+
+**Run-5 outcome**: divergence and drift fixed for good — evals 0.71 m/0
+crash (ep 4), 0.65 m/1% success (ep 8), 0.76 m (ep 12): **stable orbit
+around the target at 0.4–0.6 m that an 18 s probe shows never converging**
+(|v| ~0.2 m/s persists). Not slow convergence — a wander equilibrium.
+
+## 2026-07-07 — v6 (precision regime) didn't break the orbit; v7 does surgery
+
+v6 added a near-target precision loss (exp(−e/0.4)·e², the legacy
+"V≤0.02 push V²→0" analogue) + fine-approach chain starts (⅓ of chains
+start settled within 0.3 m) + 8 s evals. Epoch-4 eval: 0.69 m — no change.
+
+**Channel-level diagnosis** (settled-state probe, policy vs expert actions
+over 100 steps × 16 drones): thrust corr +0.61 at full magnitude (vertical
+control fine — the chains fixed it), but **lateral rates wx/wy corr only
++0.28/+0.34 at HALF the expert magnitude** — the policy under-corrects
+lateral offsets weakly and noisily. That's the orbit. Architectural cause
+candidate: the head read ONLY the GRU state — fresh visual features reach
+the rate channels through the recurrent bottleneck alone, whereas
+Geles/GRaD-Nav feed current features to the actor directly alongside memory.
+
+v7: **head skip connection** — head input = [h, current fused features].
+Grafted so behavior is EXACTLY the run-5 checkpoint at load (old head
+weights copied into the h-slice, skip-slice zeroed; zero-init graft
+collapsed to open-loop hover in smoke, 96% crash — the exact-behavior graft
+starts at run-5 level 0.57 m). Anchor made per-channel with rates ×2
+(targets the measured deficit). Run 7 = v7 from the run-5 snapshot
+(logs/bptt_run7.log).
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
