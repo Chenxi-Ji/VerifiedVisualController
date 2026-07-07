@@ -226,6 +226,40 @@ Full verified report merged into 01_research_report §4. Consequences applied:
   tight convergence) is the imitation-gap residue Phase B's closed-loop
   objective targets. Phase B launched from these weights with the corrected
   DR ranges (logs/bptt_run1.log).
+
+## 2026-07-07 — Phase B divergence: diagnosis across three runs
+
+**Run 1** (initial losses): epoch-4 eval median err 19.4 m, 17% crash —
+*worse* than the warm start. Window losses flat, grads small. Diagnosis:
+**short-horizon myopia** — on 0.2 s windows the cheapest position-loss
+reduction is to sprint at the target; terminal kinetic energy is never
+billed; the visited-state buffer (filtered only on |p|<6 m) then recycles
+runaway states as restarts. Patch v2: terminal position+velocity window cost
+("arrive gently" — the poor man's SHAC critic), global overspeed penalty
+relu(|v|−1.5)², buffer filter |v|<2.5, lr 5e-5.
+
+**Run 2** (v2): epoch-4 eval 9.7 m / 21% crash — halved, still regressing.
+Window losses *flat across 5 epochs* while closed-loop collapses ⇒ the
+gradients chase something the windows can't measure. Two structural flaws
+found:
+1. **h=0-blind windows**: every window starts with a zero GRU state — for
+   buffer-restart windows that means acting on a moving plant with no
+   velocity estimate and a stale last-action input, a condition that never
+   occurs in steady flight. Half of all gradients came from this regime
+   (Phase A's chunk burn-in existed precisely to mask it).
+2. **Unit-translation bug in the curriculum**: legacy horizons 7→25 were in
+   dt=0.1 s steps = 0.7–2.5 s of physics; my 8→32 at dt=0.025 s = 0.2–0.8 s.
+   The H=8 phase trains on windows 3.5× shorter in *seconds* than anything
+   the legacy recipe ever used — position loss mostly irreducible in-window.
+
+Patch v3: 6-step **no-grad burn-in** per window (GRU + plant warm, then the
+scored H steps start from a detached state), curriculum floor raised to
+**16→24→32→32** (0.4–0.8 s). Run 3 = v3 from the same Phase-A weights
+(logs/bptt_run3.log).
+
+Meta-lesson recorded: dt-relative hyperparameters (horizons, delays in
+steps) must be translated in *seconds*, not steps, when the control rate
+changes 4×.
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
