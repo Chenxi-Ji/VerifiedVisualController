@@ -72,15 +72,23 @@ def window_loss(env: HoverEnv, states, actions):
         a_n = torch.cat((((a[:, :1] - G) / C_SPAN),
                          a[:, 1:] / torch.tensor(RATE_LIM, device=DEV)), dim=-1)
         l_act = l_act + (a_n ** 2).mean() * 0.02
-        # perception term (transit task, approach phase only): keep the gate
-        # near the optical axis while it is still ahead — Swift/Geles reward;
-        # phase-B drones are past the gate (nothing to see), masked out
-        if hasattr(env, "phase_b"):
+        # perception term (transit tasks, gates-ahead phases only): keep the
+        # gate near the optical axis while one is still ahead — Swift/Geles
+        # reward; drones past the last gate (nothing to see) are masked out
+        if hasattr(env, "phase"):        # multi-gate: current phase's gate
+            k = env.phase.clamp(max=env.n_gates - 1)
+            gc = env.gate_c[k]
+            bearing = torch.atan2(gc[:, 1] - s.p[:, 1], gc[:, 0] - s.p[:, 0])
+            mask = (env.phase < env.n_gates).float()
+        elif hasattr(env, "phase_b"):    # single-gate transit (at origin)
             bearing = torch.atan2(-s.p[:, 1], -s.p[:, 0])
+            mask = (~env.phase_b).float()
+        else:
+            bearing = None
+        if bearing is not None:
             yaw_s, _, _ = euler_zyx_from_quat(s.q)
             berr = torch.atan2(torch.sin(bearing - yaw_s),
                                torch.cos(bearing - yaw_s))
-            mask = (~env.phase_b).float()
             l_att = l_att + 0.5 * (mask * torch.relu(berr.abs() - 0.35) ** 2).mean()
         if prev_a is not None:
             l_jerk = l_jerk + ((a - prev_a) ** 2).mean() * 0.002
@@ -167,8 +175,10 @@ def main():
     ap.add_argument("--out", default="weights/pixel_ctbr_bptt.pt")
     ap.add_argument("--polish", action="store_true",
                     help="final polish: BN frozen, cosine lr decay, H=32 only")
-    ap.add_argument("--task", choices=["hover", "transit"], default="hover",
-                    help="transit = milestone-2 gate-transit (GateTransitEnv)")
+    ap.add_argument("--task", choices=["hover", "transit", "two_gate",
+                                       "three_gate_turn"], default="hover",
+                    help="transit = milestone-2 gate-transit (GateTransitEnv); "
+                         "two_gate / three_gate_turn = multi-gate tracks")
     ap.add_argument("--ring-w", type=float, default=1.0,
                     help="final time-outside-ring weight (ramped in over 6 ep)")
     args = ap.parse_args()
@@ -179,6 +189,12 @@ def main():
     if args.task == "transit":
         from env_transit import GateTransitEnv
         env = GateTransitEnv(EnvConfig(B=48))
+    elif args.task == "two_gate":
+        from env_two_gate import TwoGateStraightEnv
+        env = TwoGateStraightEnv(EnvConfig(B=48))
+    elif args.task == "three_gate_turn":
+        from env_three_gate_turn import ThreeGateTurnEnv
+        env = ThreeGateTurnEnv(EnvConfig(B=48))
     else:
         env = HoverEnv(EnvConfig(B=48))
     env.seed(7)
@@ -314,13 +330,15 @@ def main():
         if sched is not None:
             sched.step()
         if (ep + 1) % 2 == 0 or ep == args.epochs - 1:
-            if args.task == "transit":
-                # transit metrics: crossing quality + exit hover, 13 s
+            if args.task != "hover":
+                # transit metrics: crossing quality + exit hover; horizon is
+                # task-owned (13 s single gate, 16/22 s multi-gate EVAL_T)
                 policy.eval()
                 ms = []
                 for _ in range(3):
                     env.reset()
-                    env.policy_rollout(policy, 520, no_grad=True)
+                    env.policy_rollout(policy, getattr(env, "EVAL_T", 520),
+                                       no_grad=True)
                     ms.append(env.transit_metrics())
                 policy.train()
                 m = {k: sum(x[k] for x in ms) / len(ms) for k in ms[0]}
