@@ -23,7 +23,9 @@ from train_bc import closed_loop_eval  # noqa: E402
 
 DEV = "cuda"
 HUBER = torch.nn.functional.huber_loss
-BURN = 6          # unscored GRU warm-up steps per window
+BURN = 6          # unscored GRU warm-up steps at chain start
+CHAIN = 10        # scored windows per episode chain (10 x 16-32 steps
+                  # = 4-8 s of continuous on-policy flight per chain)
 
 
 def window_loss(env: HoverEnv, states, actions):
@@ -155,45 +157,48 @@ def main():
             m.eval()
 
     opt = torch.optim.Adam(policy.parameters(), lr=args.lr)
-    buf = VisitedBuffer()
+    scale = torch.tensor([C_SPAN, *RATE_LIM], device=DEV)
     for ep in range(args.epochs):
         H = horizon_for_epoch(ep, args.epochs)
         t0 = time.time()
         agg = {}
-        for w in range(args.windows):
+        n_win = 0
+        # EPISODE-CHAINED WINDOWS (v5): each chain = fresh reset + CHAIN
+        # consecutive scored windows, state AND GRU hidden carried (detached)
+        # across windows. Slow drift accumulates along the chain exactly as
+        # in eval (chains start from rest like eval), so later windows SEE
+        # and bill integrated errors that 0.4-0.8 s windows alone cannot —
+        # the run-4 failure (05 log: slow z-drift invisible to window
+        # losses). Replaces the visited-state buffer entirely (chain states
+        # are on-policy and current by construction).
+        chains = max(1, args.windows // CHAIN)
+        for _ in range(chains):
             env.reset()
-            buf.sample_into(env, frac=0.5)
-            # burn-in: BURN unscored no-grad steps so the GRU has context
-            # before any step is billed — otherwise half the gradients come
-            # from an h=0-blind recurrent state that never occurs in steady
-            # closed-loop flight (Phase A's chunk burn-in served the same role)
             env.expert.reset()
             _, _, h = env.policy_rollout(policy, BURN, no_grad=True)
-            env.state = env.state.detach()
-            states, actions, _, labels = env.policy_rollout(
-                policy, H, h0=h.detach(), with_expert=True)
-            loss, parts = window_loss(env, states, actions)
-            # expert anchor: dense, well-conditioned gradients that bypass
-            # the plant (bootstrap-RL-with-IL). The closed-loop terms shape
-            # what BC alone couldn't (Phase A residual); this keeps the
-            # optimizer out of the flat-window plateau (run3, 05 log).
-            scale = torch.tensor([C_SPAN, *RATE_LIM], device=DEV)
-            l_bc = sum(HUBER(a / scale, lb / scale)
-                       for a, lb in zip(actions, labels)) / len(actions)
-            loss = loss + 0.2 * l_bc
-            parts["bc"] = 0.2 * float(l_bc)
-            opt.zero_grad()
-            loss.backward()
-            # clip 5.0: with burn-in + 0.4-0.8 s horizons the natural grad
-            # scale is 2-5; clipping at 1.0 starved every update (run3)
-            gn = torch.nn.utils.clip_grad_norm_(policy.parameters(), 5.0)
-            opt.step()
-            buf.add(states)
-            for k, v in parts.items():
-                agg[k] = agg.get(k, 0.0) + v
-            agg["gn"] = agg.get("gn", 0.0) + float(gn)
-        msg = " ".join(f"{k} {v/args.windows:.4f}" for k, v in agg.items())
-        print(f"epoch {ep+1}/{args.epochs} H={H}  {msg}  ({time.time()-t0:.0f}s)")
+            for c in range(CHAIN):
+                env.state = env.state.detach()
+                states, actions, h, labels = env.policy_rollout(
+                    policy, H, h0=h.detach(), with_expert=True)
+                loss, parts = window_loss(env, states, actions)
+                # expert anchor: dense gradients that bypass the plant
+                # (bootstrap-RL-with-IL); the expert's integrator runs along
+                # the whole chain, so its labels carry the integral-action
+                # signal the policy must reproduce via its hidden state
+                l_bc = sum(HUBER(a / scale, lb / scale)
+                           for a, lb in zip(actions, labels)) / len(actions)
+                loss = loss + 0.4 * l_bc
+                parts["bc"] = 0.4 * float(l_bc)
+                opt.zero_grad()
+                loss.backward()
+                gn = torch.nn.utils.clip_grad_norm_(policy.parameters(), 5.0)
+                opt.step()
+                n_win += 1
+                for k, v in parts.items():
+                    agg[k] = agg.get(k, 0.0) + v
+                agg["gn"] = agg.get("gn", 0.0) + float(gn)
+        msg = " ".join(f"{k} {v/n_win:.4f}" for k, v in agg.items())
+        print(f"epoch {ep+1}/{args.epochs} H={H} chain={CHAIN}  {msg}  ({time.time()-t0:.0f}s)")
         if (ep + 1) % 4 == 0 or ep == args.epochs - 1:
             m = closed_loop_eval(env, policy)
             # closed_loop_eval sets BN modules back via policy.train(); re-freeze
