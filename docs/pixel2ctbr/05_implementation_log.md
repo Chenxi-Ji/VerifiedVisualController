@@ -260,6 +260,28 @@ scored H steps start from a detached state), curriculum floor raised to
 Meta-lesson recorded: dt-relative hyperparameters (horizons, delays in
 steps) must be translated in *seconds*, not steps, when the control rate
 changes 4×.
+
+## 2026-07-07 — research fan-out post-mortem
+
+4 of 5 agent threads delivered (anchor deep-dive, infra survey, deployment —
+all merged into 01). The broad literature-sweep thread died twice to
+rate-limits/timeouts after its sub-threads completed but before emitting;
+§3 was instead written from primary sources directly (Swift Nature PDF read
+in full) + cross-references already in hand. Items it would have verified
+are marked [UNVERIFIED] inline in 01. Report considered complete.
+
+## 2026-07-07 — Phase B v4 (run 4, logs/bptt_run4.log)
+
+Three fixes stacked on v3, each tied to a measured run-3 symptom:
+1. **Gate-visibility filter on restart buffer** (bearing-to-gate within
+   ~52° of yaw, in front of gate, sane box) — the camera is the only
+   position sensor; restarts that can't see the gate produce noise
+   gradients.
+2. **Expert-anchor loss** (λ=0.2 Huber on normalized actions vs DAgger-style
+   expert labels along the student's own windows) — dense well-conditioned
+   gradient that bypasses the plant; bootstrap-RL-with-IL pattern.
+3. **clip 1.0→5.0, lr→1e-4** — run-3 grads sat at 2–5 so every update was
+   clipped to direction-only at ~¼ the nominal step.
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
