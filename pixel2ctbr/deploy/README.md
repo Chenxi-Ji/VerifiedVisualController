@@ -49,6 +49,11 @@ Thrust map v1 (bench-refine): `thrust01 = 0.34 · c/9.81`, clamp ≤ 0.60
   until then hires (`hires_small_color`, known K) is the fallback.**
 - Preprocess: grayscale + **cv2 INTER_AREA** to 128×96 (matches supersampled
   training AA — 05 log), /255.
+- **Frame ring buffer**: keep the last ~6 preprocessed frames (≈72 KB); the
+  model input is [current, frame(t−150 ms)] stacked in channels (visual
+  velocity baseline — 05 log v9). At stream start, prime the ring with the
+  first frame. If the deployed camera rate ≠ 40 Hz, pick the ring depth that
+  keeps the pair baseline ≈ 150 ms.
 - IMU: `/run/mpa/imu_apps` (1 kHz; raise `imu_apps_fifo_poll_rate_hz` to 500
   or write `"read"` to `/run/mpa/imu_apps/control` per frame — qvio recipe);
   `imu_data_t` = 40 B packed, CLOCK_MONOTONIC (same domain as camera

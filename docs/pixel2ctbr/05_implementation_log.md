@@ -371,6 +371,38 @@ Deployable version of the same information:
   `previous` (exactly the deployment pipeline's behavior).
 - Run 8: 28 epochs × 100 windows from the run-5 snapshot
   (logs/bptt_run8.log). Target: approach the probe's 0.113 m ceiling.
+
+**Run-8 outcome**: broke the plateau (0.68 → 0.47 → 0.44 → 0.42 m by ep 16)
+but stalled far above the probe. Physical oversight found by arithmetic: at
+40 Hz and hover speeds 0.2–0.5 m/s, **consecutive frames differ by 0.3–0.8
+px** — the added velocity signal was sub-pixel, nearly invisible to stride-2
+convs. (The probe's velocity was macroscopic; the aux loss sat at 0.009 with
+nothing learnable to chew on.)
+
+## 2026-07-07 — v9: 150 ms visual baseline (run 9) — GATE-LEVEL REACHED
+
+Pair the current frame with frame(t−6 steps) = 150 ms ago (env ring buffer;
+deployment = ring of ~6 preprocessed frames ≈ 72 KB in the model helper).
+Hover-speed motion becomes 1.5–4 px — learnable. Also unfroze trunk BNs
+(momentum 0.01): their stats predated the two-frame distribution. Warm start
+from run-8.
+
+Result trajectory (evals every 4 epochs): 0.82 (transient: prev-frame
+semantics changed 25→150 ms) → **0.318** → **0.239** → 0.397 (oscillation:
+BN drift + no lr decay) → **0.124 m / 57% success (ep 20)** → 0.151 m / 45%
+(ep 24, the auto-saved one — save-last-not-best flaw noted and fixed).
+Aux velocity loss immediately 2–4× larger than run 8 (signal present),
+crashes ≈ 0 throughout. **The deployable policy touched the privileged
+probe's ceiling** (0.124 vs 0.113 m).
+
+## 2026-07-07 — polish run (weights/pixel_ctbr_final.pt)
+
+From run-9 end: BN refrozen (stats now adapted), cosine lr 6e-5→6e-6, all
+epochs H=32, evals every 2 epochs, **best-checkpoint-by-success saving**
+(run-9's ep-20 peak was overwritten by a worse final save — fixed).
+logs/bptt_polish.log. Remaining gap to the ≥95% gate is the fat tail
+(p95 ~0.7–1 m: a minority of episodes converge slowly or stall) + the strict
+composite criterion (err<0.15 m AND |v|<0.2 AND yaw<0.15 at t=8 s).
 - `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
   (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
   exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
