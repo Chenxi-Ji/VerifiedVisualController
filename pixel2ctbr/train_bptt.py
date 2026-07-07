@@ -95,6 +95,17 @@ class VisitedBuffer:
         }
         keep = torch.isfinite(new["p"]).all(-1) & (new["p"].norm(dim=-1) < 6.0) \
             & (new["v"].norm(dim=-1) < 2.5)   # never restart from runaway states
+        # gate-visibility gate: the camera is the ONLY position sensor; a
+        # restart state whose camera can't see the gate contributes pure
+        # noise gradient. bearing(drone->gate origin) vs yaw within ~52°,
+        # in front of the gate, inside a sane box.
+        from dynamics import euler_zyx_from_quat as _e
+        yaw, _, _ = _e(new["q"])
+        bearing = torch.atan2(-new["p"][:, 1], -new["p"][:, 0])
+        berr = torch.atan2(torch.sin(bearing - yaw), torch.cos(bearing - yaw))
+        keep &= (berr.abs() < 0.9) & (new["p"][:, 1] > 0.3) \
+            & (new["p"][:, 0].abs() < 2.0) & (new["p"][:, 1] < 3.2) \
+            & (new["p"][:, 2].abs() < 1.0)
         new = {k: v[keep] for k, v in new.items()}
         if self.items is None:
             self.items = new
@@ -122,7 +133,7 @@ def main():
     ap.add_argument("--init", default="weights/pixel_ctbr_bc.pt")
     ap.add_argument("--epochs", type=int, default=24)
     ap.add_argument("--windows", type=int, default=120)   # per epoch
-    ap.add_argument("--lr", type=float, default=5e-5)
+    ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--out", default="weights/pixel_ctbr_bptt.pt")
     args = ap.parse_args()
     if args.smoke:
@@ -156,13 +167,26 @@ def main():
             # before any step is billed — otherwise half the gradients come
             # from an h=0-blind recurrent state that never occurs in steady
             # closed-loop flight (Phase A's chunk burn-in served the same role)
+            env.expert.reset()
             _, _, h = env.policy_rollout(policy, BURN, no_grad=True)
             env.state = env.state.detach()
-            states, actions, _ = env.policy_rollout(policy, H, h0=h.detach())
+            states, actions, _, labels = env.policy_rollout(
+                policy, H, h0=h.detach(), with_expert=True)
             loss, parts = window_loss(env, states, actions)
+            # expert anchor: dense, well-conditioned gradients that bypass
+            # the plant (bootstrap-RL-with-IL). The closed-loop terms shape
+            # what BC alone couldn't (Phase A residual); this keeps the
+            # optimizer out of the flat-window plateau (run3, 05 log).
+            scale = torch.tensor([C_SPAN, *RATE_LIM], device=DEV)
+            l_bc = sum(HUBER(a / scale, lb / scale)
+                       for a, lb in zip(actions, labels)) / len(actions)
+            loss = loss + 0.2 * l_bc
+            parts["bc"] = 0.2 * float(l_bc)
             opt.zero_grad()
             loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+            # clip 5.0: with burn-in + 0.4-0.8 s horizons the natural grad
+            # scale is 2-5; clipping at 1.0 starved every update (run3)
+            gn = torch.nn.utils.clip_grad_norm_(policy.parameters(), 5.0)
             opt.step()
             buf.add(states)
             for k, v in parts.items():

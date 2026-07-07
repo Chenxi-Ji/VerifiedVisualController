@@ -174,21 +174,31 @@ class HoverEnv:
         return torch.stack(imgs), torch.stack(vecs), torch.stack(acts)
 
     # ------------------------------------------------- student closed loop
-    def policy_rollout(self, policy, H: int, h0=None, no_grad=False):
+    def policy_rollout(self, policy, H: int, h0=None, no_grad=False,
+                       with_expert=False):
         """Closed-loop rollout of the policy for H steps. Images/IMU always
         detached; dynamics differentiable unless no_grad. Everything lives on
-        cfg.device (policy included). Returns (states, actions, final hidden)."""
+        cfg.device (policy included). Returns (states, actions, final hidden)
+        or (…, expert_labels) when with_expert — per-step expert actions at
+        the *student-visited* states (DAgger-style labels; the expert's
+        integrator runs along the student trajectory)."""
         h = policy.init_hidden(self.cfg.B, self.cfg.device) if h0 is None else h0
-        states, actions = [], []
+        states, actions, labels = [], [], []
         ctx = torch.no_grad() if no_grad else torch.enable_grad()
         with ctx:
             for _ in range(H):
                 img, vec = self.observe()
+                if with_expert:
+                    with torch.no_grad():
+                        labels.append(self.expert(self.state.detach(),
+                                                  self.tgt_p, self.tgt_yaw))
                 a, h = policy(img, vec, h)
                 self.state = self.dyn.step(self.state, a, self.params)
                 self.last_action = a.detach()
                 states.append(self.state)
                 actions.append(a)
+        if with_expert:
+            return states, actions, h, labels
         return states, actions, h
 
     # ------------------------------------------------------------- metrics
