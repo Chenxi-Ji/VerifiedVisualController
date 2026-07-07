@@ -49,7 +49,7 @@ yaw_f, pitch_f, roll_f = euler_zyx_from_quat(s.q)
 yaw_err = torch.atan2(torch.sin(yaw_f - tgt_yaw), torch.cos(yaw_f - tgt_yaw)).abs()
 
 ok = (~crash) & (err_p < 0.10) & (s.v.norm(dim=-1) < 0.15) & (yaw_err < 0.10)
-print(f"expert hover from start box (B={B}, randomized plant, 40 Hz, delays 50-100 ms):")
+print(f"expert hover from start box (B={B}, randomized plant, 40 Hz, delays 25-100 ms):")
 print(f"  success (err<10 cm, |v|<0.15, yaw<0.1 rad, no crash): {ok.float().mean()*100:.1f}%")
 print(f"  median final pos err: {err_p.median()*100:.1f} cm | worst: {err_p.max()*100:.1f} cm")
 print(f"  crashes: {crash.sum().item()}")

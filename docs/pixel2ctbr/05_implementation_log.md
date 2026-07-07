@@ -184,14 +184,35 @@ Budget math: distillation (~300 k frames) ≈ 17 min; SHAC/BPTT (1–10 M) ≈ 1
 - **Full Phase A launched** (30×64×160 ≈ 307 k frames, 8 epochs, 2 DAgger) →
   logs/bc_run1.log.
 
-## 2026-07-07 — deployment addendum (agent report, partial)
+## 2026-07-07 — deployment report landed → DR retuned, expert 100% ✅
 
-ModalAI px4-firmware fork adds `MC_ROLL/PITCH/YAW_CUTOFF` first-order LPF **on
-rate-PID torque output** (active in offboard rate mode); Starling 2 ships
-30/30/10 Hz ⇒ extra pole τ≈5.3 ms roll/pitch, ≈15.9 ms yaw. Our τ_ω DR
-(20–100 ms) dominates these poles — covered, but noted for system ID. No-mocap
-arming recipe: `EKF2_MAG_TYPE=5` (mag present+calibrated but unfused; passes
-arming checks; yaw = drifting gyro integral — fine for body-rate policy) or
-remove mag + `SYS_HAS_MAG=0`; `EKF2_HGT_REF=0` (baro). MAVSDK
-`AttitudeRate(roll_deg_s, pitch_deg_s, yaw_deg_s, thrust_value)` confirmed
-(PX4 v1.14.3 / MAVSDK v2.12.2 pins). Full main report re-requested.
+Full verified report merged into 01_research_report §4. Consequences applied:
+- `DynParams.randomized` retuned to measured reality: twr 2.0–3.2 (was
+  1.6–2.6; real T/W ≈2.6–2.9), τ_ω 0.015–0.06 s (was 0.02–0.10; real rate
+  loop ~10–20 Hz bw + torque LPF 5–16 ms + motor 10–30 ms), τ_c 0.010–0.045,
+  delay 1–4 steps (tracking-cam path ~20–35 ms glass→cmd).
+- Re-ran gates: dynamics 22/22; **expert now 100.0% / worst 0.9 cm** — the old
+  4% failure tail lived in the pessimistic slow-τ corner that reality doesn't
+  have.
+- NOTE: the Phase-A BC run launched earlier trains against the OLD (harder)
+  ranges — fine for a warm start; Phase B and any Phase-A rerun use the new.
+
+## 2026-07-07 — deployment scaffold + eval gate written
+
+- `pixel2ctbr/deploy/ctbr_offboard.py` — MAVSDK rate runner on the
+  ctrl_lya_offboard skeleton: PX4 param-recipe preflight check, ≥1 s setpoint
+  stream before offboard.start(), rate-mode failsafe ladder (stale 0.15 s →
+  hover-hold frames at 50 Hz; 0.6 s → offboard.stop() → Stabilized; RC flip →
+  takeover), thrust map `thrust01 = 0.34·c/g` clamp 0.60. NOT hardware-run;
+  gated by 06 C-ladder.
+- `pixel2ctbr/deploy/README.md` — the full param recipe + camera/model-helper
+  spec (tracking-cam target with calibration blocker; INTER_AREA preprocessing
+  to match trained AA; IMU pipe recipe; 1–2 XNNPACK threads, never GPU
+  delegate) + bench ladder.
+- `pixel2ctbr/eval_policy.py` — 512-episode gate + ablations (no-tilt,
+  delay+1, gain-edges, DR-off overfit check).
+- `pixel2ctbr/export_policy.py` — export + 1000-step closed-loop parity
+  (random-weights parity 2.5e-3). Found two landmines: torch≥2.9 dynamo
+  exporter default breaks onnx2tf (`dynamo=False`); `.mean(dim)` → TFLite
+  MEAN(INT64 axis) runtime rejection → mean-sub reexpressed as AvgPool.
+- Memory + PROJECT_STATE pointers to the new phase.
