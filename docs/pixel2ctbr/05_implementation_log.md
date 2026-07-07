@@ -403,6 +403,57 @@ epochs H=32, evals every 2 epochs, **best-checkpoint-by-success saving**
 logs/bptt_polish.log. Best: **75.5% success, 0.092 m median, p95 0.36 m,
 0 crashes** at epoch 4; stable 65–75% band thereafter.
 
+## 2026-07-07 (later) — 95% push: tail diagnosis + v10/v11/v12
+
+**Tail diagnosis** (`diagnose_tail.py`, 1024 episodes on the 75.5% ckpt):
+NO start-condition or DR pocket — failures uniform. 92% are position-only;
+median failing episode parks at 21 cm (just outside the 15 cm ring); 53%
+graze 0.15–0.3 m, 30% stall farther, 17% reach-then-leave. Longer-horizon
+probe: success 71.4% @8 s → 83.9% @12 s → 86.2% @16 s ⇒ **the tail is
+substantially SLOW, not lost** — plus a steady-state parking offset.
+
+**v10** (chain-position weighting = steady-state pressure; sharper ring
+precision term; CHAIN 13 = 10.4 s; dual-horizon evals): best **83.9% @8 s /
+99.0% @12 s peak gate, median 4–6 cm** — steady-state solved; residual gap
+is arrival speed. (Also survived a mid-run laptop suspend, 1m22s — CUDA
+context held.)
+
+**v11** (snappier verified teacher kp4.2/ki2.2/katt7 + soft time-outside-ring
+loss): REGRESSION — stuck 60–75% with crash flickers; the aggressive teacher
+labels conflict with the converged smooth policy at low lr. Teacher reverted
+to soft gains. **Recorded negative result.**
+
+**v12** (attribution run: ring loss ONLY, soft teacher, from v10-best) —
+running (logs/bptt_v12.log). Deliverable checkpoint meanwhile remains
+v10-best `weights/pixel_ctbr_final2.pt`; re-exported → parity 4.8e-3.
+
+Honest framing pinned: the 8 s deadline in the strict gate is OUR design
+choice (mirrors the expert's timescale); at 12 s the policy already clears
+95%+ in peak gates. If 8 s tops out below 95%, report both horizons rather
+than silently moving the goalpost.
+
+## 2026-07-07 (later) — Starling2 repo made hardware-test-ready
+
+Committed `bc7d74e` in `~/certified_visual_controller/Starling2` (user's
+uncommitted ctrl_lya edits untouched):
+- **`pixel_ctbr_model_helper.{h,cpp}`** — the missing onboard piece: gray +
+  INTER_AREA 128×96 (AA-matched to training), frame ring (PIXEL_CTBR_RING,
+  default 5 ≈ 167 ms @30 fps), IMU reader thread on `/run/mpa/imu_apps`
+  (imu_data_t magic-scan, averaged per frame), 12-D vec EXACTLY matching
+  `policy.py::normalize_vec` (tilt slots zeroed — dropout-trained), GRU
+  hidden carry with 0.5 s-gap reset, publishes wire-compatible `CLYA` msg
+  (mpa_reader unchanged). Wired into enum/factory/model-path (sources are
+  CMake-globbed).
+- **`ctbr_offboard.py`** — rate-mode runner: PX4 param-recipe preflight,
+  ≥1 s setpoint stream, failsafe ladder (0.15 s hover-hold / 0.6 s
+  stale-exit → Stabilized / RC-flip takeover / reader-death), CSV logging,
+  background telemetry watcher.
+- **`pixel_ctbr.tflite`** (264 KB, v10-best weights, parity 4.8e-3) into
+  `misc_files/usr/bin/dnn/`.
+- **`PIXEL_CTBR_DEPLOY.md`** — config, param recipe, C1–C7 bench ladder,
+  v1 limitations. First gate C1 = on-device build + tensor-discovery check
+  (cannot compile here — needs voxl-cross + TFLite 2.8 headers).
+
 ## 2026-07-07 — day-1 close-out
 
 - Definitive 512-episode eval + ablations: see 06_verification.md §B
