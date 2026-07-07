@@ -38,7 +38,11 @@ def window_loss(env: HoverEnv, states, actions):
         e_p = s.p - env.tgt_p
         l_pos = l_pos + wt * HUBER(e_p, zero3)
         near = torch.exp(-(e_p.detach().norm(dim=-1)))     # damp v near target
-        l_vel = l_vel + wt * (near * s.v.norm(dim=-1).clamp(max=5.0) ** 2).mean() * 0.5
+        spd = s.v.norm(dim=-1)
+        l_vel = l_vel + wt * (near * spd.clamp(max=5.0) ** 2).mean() * 0.5 \
+            + (torch.relu(spd - 1.5) ** 2).mean() * 0.3    # global overspeed:
+        # short windows otherwise reward sprinting at the target — kinetic
+        # energy at window end is free (the epoch-4 divergence, 05 log)
         yaw, pitch, roll = euler_zyx_from_quat(s.q)
         yerr = 1.0 - torch.cos(yaw - env.tgt_yaw)
         tilt_pen = (torch.relu(pitch.abs() - 0.44) ** 2
@@ -50,9 +54,14 @@ def window_loss(env: HoverEnv, states, actions):
         if prev_a is not None:
             l_jerk = l_jerk + ((a - prev_a) ** 2).mean() * 0.002
         prev_a = a
+    # terminal cost: the window must END slow and close, or truncated BPTT
+    # learns arrive-fast myopia (same role as SHAC's terminal critic, cheaper)
+    sT = states[-1]
+    l_term = 2.0 * HUBER(sT.p - env.tgt_p, zero3) \
+        + 1.5 * HUBER(sT.v, zero3)
     n = T
     parts = {"pos": l_pos / n, "vel": l_vel / n, "att": 0.3 * l_att / n,
-             "act": l_act / n, "jerk": l_jerk / max(n - 1, 1)}
+             "act": l_act / n, "jerk": l_jerk / max(n - 1, 1), "term": l_term}
     return sum(parts.values()), {k: float(v) for k, v in parts.items()}
 
 
@@ -79,7 +88,8 @@ class VisitedBuffer:
             "q": torch.cat([s.q for s in take]),
             "w": torch.cat([s.w for s in take]),
         }
-        keep = torch.isfinite(new["p"]).all(-1) & (new["p"].norm(dim=-1) < 6.0)
+        keep = torch.isfinite(new["p"]).all(-1) & (new["p"].norm(dim=-1) < 6.0) \
+            & (new["v"].norm(dim=-1) < 2.5)   # never restart from runaway states
         new = {k: v[keep] for k, v in new.items()}
         if self.items is None:
             self.items = new
@@ -107,7 +117,7 @@ def main():
     ap.add_argument("--init", default="weights/pixel_ctbr_bc.pt")
     ap.add_argument("--epochs", type=int, default=24)
     ap.add_argument("--windows", type=int, default=120)   # per epoch
-    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--out", default="weights/pixel_ctbr_bptt.pt")
     args = ap.parse_args()
     if args.smoke:
