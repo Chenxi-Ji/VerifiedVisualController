@@ -39,15 +39,17 @@ _CAM_AXES_Q = torch.tensor([-0.5, 0.5, 0.5, -0.5])
 class SplatRenderer:
     def __init__(self, width=128, height=96, device="cuda", chunk=64,
                  mount_jitter_rad=0.0, intrinsics_jitter=0.0, gray=True,
-                 supersample=2):
+                 supersample=2, scene=None):
         """supersample: render at N x target res and average-pool NxN down.
         Approximates the box-filter of the deployed downscale (spec: onboard
         preprocessing uses cv2 INTER_AREA); nearly free because throughput is
-        gaussian-projection-bound, not pixel-bound (02_repo_audit.md §2)."""
+        gaussian-projection-bound, not pixel-bound (02_repo_audit.md §2).
+        scene: prebuilt load_gsplat_scene tuple (e.g. edited by scene_edit.py
+        — duplicated gates); None loads the pristine checkpoint."""
         self.gray = gray
         self.ss = int(supersample)
         cfg = Config()
-        self.scene = load_gsplat_scene(cfg)
+        self.scene = load_gsplat_scene(cfg) if scene is None else scene
         (self.means, self.quats, opac, scl, self.colors,
          transform, self.scale, world_frame) = self.scene
         assert world_frame, "world_frame.json required (gate-centered frame)"
