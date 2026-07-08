@@ -37,6 +37,28 @@ crossing step gets its own measured checkpoint.*
   every ablation; zero crashes at 2560 episodes. **Gate (≥95% strict
   composite) NOT yet met** — limiter is the slow-episode tail (p95 44 cm),
   not the typical case. Tail diagnosis is the next training-side task.
+
+### Final round (v10 vs v13, definitive 512-ep fixed-seed evals, 8 s)
+
+  | condition | v13-best (final5) | v10-best (final2) |
+  |---|---|---|
+  | base | 82.8% / 3.5 cm / p95 20.1 | **84.0%** / 5.6 cm / p95 32.2 |
+  | no-tilt | 72.1% (−10.7) | **83.4% (−0.6)** |
+  | delay +25 ms | 61.9% (−20.9) | **77.1% (−6.9)** |
+  | gain edges | **81.4%** | 78.7% |
+  | image-DR off | 80.5% | 77.7% |
+  Crashes ≈ 0 across all 5120 episodes.
+
+  **Flight deliverable: v10-best (`weights/pixel_ctbr_final2.pt`)** — the
+  headline is a statistical tie, but v13 bought its 3.5 cm precision with
+  brittleness (tilt-dependent, 3× the latency sensitivity — its faster
+  approaches spend the latency margin). Robustness wins for hardware; the
+  exported `pixel_ctbr.tflite` in Starling2 is already built from v10-best
+  (parity 4.8e-3). v13-best kept as the precision line; identified next
+  training lever: widen delay DR (train at 25–125 ms) to buy the margin
+  back, then re-run this table.
+  At 12 s horizons both models hover ~87–92% (peak gates 99%); the residual
+  8 s gap is arrival-speed for a minority of far/awkward starts.
 - Export ✅ `weights/pixel_ctbr.tflite` 264 KB fp16; 1000-step closed-loop
   parity vs PyTorch: max action diff 5.4e-3 (≈0.06% of thrust span) — C1
   passed on desktop (on-device TFLite-2.8 re-check pending, C2).
