@@ -181,6 +181,12 @@ def main():
                          "two_gate / three_gate_turn = multi-gate tracks")
     ap.add_argument("--ring-w", type=float, default=1.0,
                     help="final time-outside-ring weight (ramped in over 6 ep)")
+    ap.add_argument("--no-ring-ramp", action="store_true",
+                    help="constant ring weight (init already ring-adapted)")
+    ap.add_argument("--wide-delay", action="store_true",
+                    help="train-time-only delay DR widening to 1-5 ctrl steps "
+                         "(25-125 ms); evals keep standard DR so tables stay "
+                         "comparable. Targets v13's latency brittleness.")
     args = ap.parse_args()
     if args.smoke:
         args.epochs, args.windows = 2, 4
@@ -259,7 +265,8 @@ def main():
     for ep in range(args.epochs):
         H = 32 if args.polish else horizon_for_epoch(ep, args.epochs)
         global RING_W
-        RING_W = args.ring_w * min(1.0, ep / 6.0)   # ramp over 6 epochs
+        RING_W = args.ring_w if args.no_ring_ramp else \
+            args.ring_w * min(1.0, ep / 6.0)        # ramp over 6 epochs
         t0 = time.time()
         agg = {}
         n_win = 0
@@ -274,6 +281,9 @@ def main():
         chains = max(1, args.windows // CHAIN)
         for ci in range(chains):
             env.reset()
+            if args.wide_delay:
+                env.params.delay_steps = torch.randint(
+                    1, 6, (env.cfg.B,), device=DEV)
             if ci % 3 == 2:
                 # fine-approach chains: start settled near the target so the
                 # terminal-precision regime gets concentrated training signal
