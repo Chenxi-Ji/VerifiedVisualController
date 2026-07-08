@@ -42,11 +42,15 @@ from dynamics import quat_mul  # noqa: E402
 from render_bridge import METERS_PER_UNIT  # noqa: E402
 
 # Gate crop box in gate-frame METERS (xmin,xmax),(ymin,ymax),(zmin,zmax).
-# Ring + frame occupy ~|x|,|z| < 0.7, |y| < 0.25; z up to +0.7 only would
-# include the stand legs + a floor disc — verified visually (see
-# docs/pixel2ctbr/07_multigate_envs.md) that the ring-only cut below avoids
-# dragging floor gaussians while keeping the full ring + mounting collar.
-GATE_BOX = ((-0.72, 0.72), (-0.28, 0.28), (-0.72, 0.60))
+# Ring + frame occupy ~|x|,|z| < 0.7, |y| < 0.25. z DOWN: the outer wire
+# hoop closes at z≈+0.72 (an earlier +0.60 cut sliced the lower hoop arc +
+# mounting collar off every duplicate); the short stand legs run from the
+# collar to the FLOOR MAT at z≈+0.855 (mocap: gate center 0.855 m above the
+# floor — NOT 1.2 m as previously believed). z-max +0.82 keeps the full
+# ring + collar + near-full legs (ending ~3 cm above the mat) and excludes
+# the mat layer: at +0.86 copies provably drag mat/tape-line fragments
+# along (pixel-diffed renders; see docs/pixel2ctbr/07_multigate_envs.md).
+GATE_BOX = ((-0.72, 0.72), (-0.28, 0.28), (-0.72, 0.82))
 
 
 # ------------------------------------------------------------- frame algebra
