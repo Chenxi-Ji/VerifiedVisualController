@@ -5,8 +5,15 @@ Renders drone-view color frames of edited scenes to spike_out/multigate/:
   two   — frames along the two-gate trajectory (env_two_gate waypoints)
   three — frames along the three-gate-turn trajectory
 
-Run from repo root:  python pixel2ctbr/spike_multigate.py [crop|two|three]
-GPU-frugal: chunk=8, <=4 poses per call (a training run owns the GPU).
+All rendered scenes are floater-cleaned (scene_edit.clean_floaters, 07 §6):
+  crop applies it to the loaded scene explicitly; two/three/hires get it via
+  scene_edit.multi_gate_scene / clean_scene.
+
+Run from repo root:
+  python pixel2ctbr/spike_multigate.py [crop|two|three|hires|bench]
+hires — 1024x768 color samples of all three scenes (single/two/three) to
+spike_out/multigate_hires/, chunk=1.
+GPU-frugal: chunk<=8, <=4 poses per call (a training run may own the GPU).
 """
 
 from __future__ import annotations
@@ -29,28 +36,35 @@ OUT = "pixel2ctbr/spike_out/multigate"
 W, H = 512, 384          # inspection res (fisheye intrinsics scale with W,H)
 
 
-def save_views(scene, poses, names, prefix):
+def save_views(scene, poses, names, prefix, out=None, w=None, h=None,
+               chunk=None):
     """poses: list of [x,y,z(m), yaw,pitch,roll]; renders <=4 at a time."""
-    r = SplatRenderer(width=W, height=H, gray=False, supersample=1,
-                      chunk=8, scene=scene)
-    os.makedirs(OUT, exist_ok=True)
-    for i in range(0, len(poses), 4):
-        chunk = poses[i:i + 4]
-        p = torch.tensor([c[:3] for c in chunk], dtype=torch.float32)
-        e = torch.tensor([c[3:] for c in chunk], dtype=torch.float32)
+    out, w, h = out or OUT, w or W, h or H
+    r = SplatRenderer(width=w, height=h, gray=False, supersample=1,
+                      chunk=chunk or 8, scene=scene)
+    os.makedirs(out, exist_ok=True)
+    step = min(4, chunk or 4)
+    for i in range(0, len(poses), step):
+        batch = poses[i:i + step]
+        p = torch.tensor([c[:3] for c in batch], dtype=torch.float32)
+        e = torch.tensor([c[3:] for c in batch], dtype=torch.float32)
         q = quat_from_euler_zyx(e[:, 0], e[:, 1], e[:, 2])
         img = r.render_pose_quat(p, q)          # (b,3,H,W)
-        for j, name in enumerate(names[i:i + 4]):
+        for j, name in enumerate(names[i:i + step]):
             arr = (img[j].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
             import cv2
-            cv2.imwrite(f"{OUT}/{prefix}_{name}.png", arr[..., ::-1])
-            print(f"saved {OUT}/{prefix}_{name}.png")
+            cv2.imwrite(f"{out}/{prefix}_{name}.png" if prefix else
+                        f"{out}/{name}.png", arr[..., ::-1])
+            print(f"saved {out}/{prefix + '_' if prefix else ''}{name}.png")
     del r
     torch.cuda.empty_cache()
 
 
 def crop_qa():
     scene = load_gsplat_scene(Config())
+    fl = se.clean_floaters(scene)
+    print(f"floater cleanup: {int(fl.sum()):,} gaussians removed")
+    scene = se.delete_gaussians(scene, fl)
     mask = se.extract_gate_gaussians(scene)
     print(f"gate mask: {int(mask.sum()):,} gaussians")
     front = [0.0, 1.4, 0.0, -np.pi / 2, 0.0, 0.0]
@@ -79,13 +93,49 @@ def traj_qa(env_mod, prefix):
     save_views(scene, poses, names, prefix)
 
 
+def hires():
+    """1024x768 color samples of the three (floater-cleaned) scenes for
+    human inspection — chunk=1 to keep the projection buffers tiny."""
+    import math
+    out = "pixel2ctbr/spike_out/multigate_hires"
+    kw = dict(out=out, w=1024, h=768, chunk=1, prefix="")
+    yw = -np.pi / 2
+    save_views(se.clean_scene(), [
+        [0.0, 2.4, 0.0, yw, 0.0, 0.0],
+        [0.0, 1.4, 0.0, yw, 0.0, 0.0],
+        [0.0, 1.5, 0.35, yw, -0.35, 0.0],
+    ], ["single_start", "single_target", "single_gate_bottom"], **kw)
+
+    import env_two_gate, env_three_gate_turn
+    save_views(se.multi_gate_scene(env_two_gate.DUP_GATE_POSES), [
+        [0.0, 2.1, 0.0, yw, 0.0, 0.0],
+        [0.0, 0.7, 0.0, yw, 0.0, 0.0],
+        [0.0, -1.2, 0.0, yw, 0.0, 0.0],
+    ], ["twogate_start", "twogate_pre_gate1", "twogate_between"], **kw)
+
+    # three-gate: poses derived from the arc geometry (env doc §3)
+    t = math.radians(40.0)
+    c1, c3 = (0.684, 1.879), (0.684, -1.879)
+    n1 = (math.sin(t), math.cos(t))
+    n3 = (-math.sin(t), math.cos(t))
+    save_views(se.multi_gate_scene(env_three_gate_turn.DUP_GATE_POSES), [
+        [c1[0] + 1.2 * n1[0], c1[1] + 1.2 * n1[1], 0.0, yw - t, 0.0, 0.0],
+        [c1[0] + 0.7 * n1[0], c1[1] + 0.7 * n1[1], 0.0, yw - t, 0.0, 0.0],
+        [c1[0] - 0.35 * n1[0], c1[1] - 0.35 * n1[1], 0.0, yw, 0.0, 0.0],
+        [c3[0] + 0.7 * n3[0], c3[1] + 0.7 * n3[1], 0.0, yw + t, 0.0, 0.0],
+    ], ["threegate_start", "threegate_pre_g1", "threegate_past_g1",
+        "threegate_pre_g3"], **kw)
+
+
 def bench():
-    """Throughput sanity at training settings (128x96 ss=2 gray) for the
-    composited scenes vs pristine. chunk=8/B=8 keeps the footprint tiny
-    while a training run owns the GPU — relative slowdown is the number."""
+    """Throughput sanity at training settings (128x96 ss=2 gray): raw vs
+    floater-cleaned pristine vs the composited tracks. chunk=8/B=8 keeps
+    the footprint tiny while a training run owns the GPU — relative
+    numbers are the point."""
     import time
     import env_two_gate, env_three_gate_turn  # noqa: F401
-    scenes = [("pristine", load_gsplat_scene(Config()))]
+    scenes = [("raw", load_gsplat_scene(Config())),
+              ("cleaned", se.clean_scene())]
     scenes.append(("two-gate", se.multi_gate_scene(env_two_gate.DUP_GATE_POSES)))
     scenes.append(("three-gate",
                    se.multi_gate_scene(env_three_gate_turn.DUP_GATE_POSES)))
@@ -121,5 +171,7 @@ if __name__ == "__main__":
         traj_qa("env_two_gate", "10_two")
     elif what == "three":
         traj_qa("env_three_gate_turn", "20_three")
+    elif what == "hires":
+        hires()
     elif what == "bench":
         bench()

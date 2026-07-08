@@ -108,11 +108,16 @@ class HoverEnv:
         must not be called)."""
         self.cfg = cfg
         self.dyn = QuadCTBRDynamics(dt_ctrl=cfg.dt_ctrl, n_sub=cfg.n_sub)
-        self.renderer = None if renderer is False else (
-            renderer or SplatRenderer(
+        if renderer is None:
+            # floater-cleaned pristine scene (scene_edit.clean_floaters —
+            # cosmetic-only, 07 doc §6; lazy import: scene_edit needs cuda
+            # scene tensors only when we actually render)
+            import scene_edit
+            renderer = SplatRenderer(
                 width=cfg.width, height=cfg.height, device=cfg.device,
                 mount_jitter_rad=0.5 * torch.pi / 180, intrinsics_jitter=1.0,
-                gray=True, supersample=2))
+                gray=True, supersample=2, scene=scene_edit.clean_scene())
+        self.renderer = None if renderer is False else renderer
         self.dr = GrayDomainRandomizer() if image_dr else None
         self.expert = GeometricHoverExpert(dt=cfg.dt_ctrl)
         B, dev = cfg.B, cfg.device

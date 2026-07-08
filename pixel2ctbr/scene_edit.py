@@ -146,10 +146,83 @@ def delete_gaussians(scene, mask):
     return tuple(t[keep] for t in scene[:5]) + tuple(scene[5:])
 
 
-def multi_gate_scene(gate_poses):
-    """Load the pristine scene and append a gate copy per pose in
-    gate_poses (list of 4x4 gate-frame-METERS, originals excluded)."""
+# ---------------------------------------------------------- floater cleanup
+def clean_floaters(scene) -> torch.Tensor:
+    """(N,) bool mask of cosmetic 3DGS floaters — apply with
+    delete_gaussians(). Recomputed deterministically from gaussian
+    positions/colors/opacities in ~ms (nothing persisted).
+
+    The splat carries mat-blue reconstruction fuzz hovering in FREE SPACE
+    where nothing physical exists: a 0.60-0.85 layer floating 5-25 cm above
+    the mat plane (mat surface z ~ +0.855, z DOWN), wispy mid-air fog
+    clouds, a blue haze band in front of the door wall, and blue wisps
+    inside the gate opening that every duplicate_gate() copy inherits.
+    Thresholds were tuned VISUALLY (before/after renders + pixel diffs,
+    docs/pixel2ctbr/07_multigate_envs.md §6); biased conservative — walls,
+    roof, mat surface (z >= 0.80), tape lines, cables (dark), furniture and
+    everything outside the flight volume are untouched.
+
+    Group summary (gate-frame meters; bexc = blue - max(red,green),
+    val = max(r,g,b), band-0 SH colors):
+      1 mid-air fog   : interior box, -1.6 <= z < 0.30, val >= 0.25
+                        (dark kept: hanging cables cross this volume)
+      2 near-gate hover: interior, r_xy < 1.35, 0.30 <= z < 0.80,
+                        blue (bexc > 0.03) OR dark specks (val < 0.25)
+                        - the blue blobs at the gate bottom; nothing
+                        physical hovers there (legs live in GATE_BOX)
+      3 gate-box fuzz : inflated GATE_BOX (+-0.10), bexc > 0.05, val < 0.75
+                        (val guard protects bluish-white fabric; cleans the
+                        opening/legs fuzz BEFORE duplication)
+      4 door haze band: x(0,1.9), y[-3.30,-2.75), z(-1.3,0.55), bexc > 0.05
+                        (floats ~0.1-0.6 m in front of the door wall)
+      5 far -y halo   : interior, y < -1.35, 0.30 <= z < 0.68, bexc > 0.03,
+                        opacity < 0.35 - low-opacity wisp halo only: in the
+                        view-extrapolated -y region the VISUAL mat surface
+                        itself is reconstructed 10-30 cm high, so denser/
+                        deeper fuzz there is load-bearing and is kept.
+    """
+    means, quats, opac, scl, colors = scene[:5]
+    p = gate_frame_means_m(scene)
+    C0 = 0.28209479177387814
+    rgb = (C0 * colors[:, 0, :] + 0.5).clamp(0, 1)
+    bexc = rgb[:, 2] - rgb[:, :2].max(1).values
+    val = rgb.max(1).values
+    op = torch.sigmoid(opac).squeeze(-1)
+
+    inf = 0.10
+    (x0, x1), (y0, y1), (z0, z1) = GATE_BOX
+    in_gate = ((p[:, 0] > x0 - inf) & (p[:, 0] < x1 + inf) &
+               (p[:, 1] > y0 - inf) & (p[:, 1] < y1 + inf) &
+               (p[:, 2] > z0 - inf) & (p[:, 2] < z1 + inf))
+    interior = ((p[:, 0].abs() < 1.9) & (p[:, 1] > -2.7) & (p[:, 1] < 2.9) &
+                ~in_gate)
+    r_xy = p[:, :2].norm(dim=1)
+    hover = (p[:, 2] >= 0.30) & (p[:, 2] < 0.80)
+
+    m = interior & (p[:, 2] >= -1.6) & (p[:, 2] < 0.30) & (val >= 0.25)
+    m |= interior & (r_xy < 1.35) & hover & ((bexc > 0.03) | (val < 0.25))
+    m |= in_gate & (bexc > 0.05) & (val < 0.75)
+    m |= ((p[:, 0] > 0.0) & (p[:, 0] < 1.9) &
+          (p[:, 1] >= -3.30) & (p[:, 1] < -2.75) &
+          (p[:, 2] > -1.3) & (p[:, 2] < 0.55) & (bexc > 0.05))
+    m |= (interior & (p[:, 1] < -1.35) & (p[:, 2] >= 0.30) & (p[:, 2] < 0.68)
+          & (bexc > 0.03) & (op < 0.35))
+    return m
+
+
+def clean_scene():
+    """The pristine checkpoint with floaters removed — the base scene for
+    every track (single-gate envs pass it to SplatRenderer(scene=...))."""
     scene = load_gsplat_scene(Config())
+    return delete_gaussians(scene, clean_floaters(scene))
+
+
+def multi_gate_scene(gate_poses):
+    """Load the floater-cleaned scene and append a gate copy per pose in
+    gate_poses (list of 4x4 gate-frame-METERS, originals excluded). Cleanup
+    runs BEFORE extraction so copies inherit a clean gate (no blue wisps
+    in the duplicated openings)."""
+    scene = clean_scene()
     mask = extract_gate_gaussians(scene)
     extras = [duplicate_gate(scene, T, mask=mask) for T in gate_poses]
     return compose(scene, *extras)
@@ -198,4 +271,20 @@ if __name__ == "__main__":
     print(f"copy centroid {c_new.tolist()} (expect src + [0,-2.2,0])")
     d = (c_new - c_src - torch.tensor([0, -2.2, 0], device=c_new.device))
     assert d.abs().max().item() < 1e-3
+
+    # floater cleanup: deterministic, small, never touches the gate proper
+    fl = clean_floaters(scene)
+    n_fl = int(fl.sum())
+    print(f"clean_floaters: {n_fl:,} gaussians "
+          f"({100 * fl.float().mean():.3f}% of scene)")
+    assert torch.equal(fl, clean_floaters(scene)), "mask not deterministic"
+    assert n_fl < 0.011 * means.shape[0], "cleanup unexpectedly aggressive"
+    # the gate ring itself (non-blue strict-box content) must be untouched
+    C0 = 0.28209479177387814
+    rgb = (C0 * scene[4][:, 0, :] + 0.5).clamp(0, 1)
+    bexc = rgb[:, 2] - rgb[:, :2].max(1).values
+    ring = mask & (bexc <= 0.03)
+    assert int((fl & ring).sum()) == 0, "cleanup ate non-blue gate content"
+    print(f"gate box after cleanup: {int((mask & ~fl).sum()):,} gaussians "
+          f"(was {int(mask.sum()):,})")
     print("ALL PASS")
