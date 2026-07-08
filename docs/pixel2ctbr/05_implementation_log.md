@@ -600,3 +600,40 @@ three-gate v2 **100% on seeds 5/1/11/42**, zero strikes, exit err ~3 mm.
 Bonus: the old threegate_past_g1 hires frame (unusable −y smear) is now a
 crisp +y-space view; QA + 1024×768 hires renders regenerated. Throughput
 432/338/359 img/s (pristine/two/three, v14 sharing the GPU) ≥ design 295.
+
+## 2026-07-07 (night) — splat floater cleanup + showcase orbits
+
+User feedback: blue floaty artifacts around the gates/arena (worst at the
+gate BOTTOM) in the multi-gate renders. Point-cloud probe located them:
+mat-blue reconstruction fuzz hovering 5–25 cm ABOVE the mat plane
+(nothing exists at z∈[0.30,0.60) near the gate — the fuzz is a
+z∈[0.60,0.85] layer), sparse mid-air fog (median opacity 0.04), a haze
+band ~0.1–0.6 m in front of the door wall, and blue wisps inside the
+gate OPENING that `duplicate_gate` copied into every duplicate. Recolor
+diagnostics also showed the deep-−y hover layer IS the rendered mat
+there (extrapolated surface reconstructed 10–30 cm high) — so wholesale
+above-mat deletion was rejected; the far field only sheds its
+low-opacity halo (op<0.35).
+
+`scene_edit.clean_floaters(scene)`: deterministic mask from gate-frame
+geometry + blue-excess color + opacity (five groups, thresholds in 07
+§6.2), **9,768 gaussians = 0.606%**; `clean_scene()` feeds HoverEnv's
+default renderer and `multi_gate_scene()` cleans BEFORE extraction
+(gate box 41,405 → 39,305; copies lose their blue freight). __main__
+asserts determinism, <1.1% budget, and that non-blue gate-ring content
+can never be masked. Verified over 3 visual rounds (13 views, pixel
+diffs, before/after strips in `spike_out/floater_cleanup/`): gate-bottom
+blobs/door haze/shelf streaks/mid-air fog GONE (a shelf drone model
+resurfaced from under a streak); mat texture/tape, walls, roof, cables,
+towel, furniture intact. Policy-eye 128×96: mean |diff| 0.2–0.4%,
+localized — training stats unchanged. Regressions: two-/three-gate
+oracles 100% (state-only path untouched), throughput unchanged within
+noise (raw 666 vs cleaned 601–630 img/s, ±5% run variance, idle GPU).
+QA + hires sets regenerated (`spike_multigate.py` gains `hires` — incl.
+a new `single_gate_bottom` close-up — and a raw-vs-cleaned bench row).
+
+Plus: `showcase_video.py` — slow 360° orbit mp4s of all three cleaned
+scenes (24 s / 720 frames @ 30 fps, 1024×768 calibrated fisheye, h264
+yuv420p +faststart) to `spike_out/showcase/`; elliptical orbits fitted
+inside the safety nets (a circle past the outermost gate would leave the
+walled capture volume), ring clearance ≥0.95 m, framing probe-verified.

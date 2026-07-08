@@ -9,6 +9,11 @@ regenerate with `python pixel2ctbr/spike_multigate.py [crop|two|three|bench]`).*
 bottoms fixed — §2) and the three-gate arc re-anchored with the real gate in
 the MIDDLE (old gate 3 pressed against the safety net — §3). Oracles re-run.*
 
+*Rev 2026-07-07 (night): floater cleanup — `scene_edit.clean_floaters`
+removes ~9.8k cosmetic 3DGS floaters from every scene (blue gate-bottom
+blobs, door haze, mid-air fog) before gate duplication; §6. 360° showcase
+orbit videos added (`pixel2ctbr/showcase_video.py`); §6.5.*
+
 ## 0. Summary
 
 The arena splat contains exactly one gate. FalconGym 2.0's editable-gsplat
@@ -23,7 +28,9 @@ index of the track — `REAL_GATE`); `env_two_gate.py` /
 transits on the randomized plant. Rendering cost at training settings:
 −22% (two-gate) / −17% (three-gate) img/s vs pristine (GPU shared with the
 v14 run; three-gate is cheaper than two-gate because its upstream gate is
-behind the camera for most of the track).
+behind the camera for most of the track). All scenes are floater-cleaned
+at load since the night rev (§6): −9,768 cosmetic gaussians, duplicates
+inherit clean openings.
 
 ## 1. FalconGym 2.0 survey (both local copies read)
 
@@ -63,7 +70,9 @@ What we did differently (`scene_edit.py`):
 ## 2. Gate extraction (crop box)
 
 `GATE_BOX = ((−0.72, 0.72), (−0.28, 0.28), (−0.72, 0.82))` gate-frame
-meters → **41,405 gaussians (2.57%** of 1.61 M). The original cut at
+meters → **41,405 gaussians (2.57%** of 1.61 M) on the raw checkpoint;
+39,305 after the §6 floater cleanup that now precedes extraction (the
+2,100 delta is mat-blue fuzz that used to ship with every copy). The original cut at
 z-max **+0.60 sliced the duplicates' bottoms** (user-visible): the outer
 wire hoop closes at z≈+0.72, so every copy lost the lower hoop arc, the
 bottom orange marker and the mounting collar — bare bottom segment with
@@ -226,3 +235,118 @@ test_render_bridge ALL PASS).
 6. Training on these tasks not yet run (GPU owned by hover-task v13);
    first candidate recipe: warm-start from the transit-task checkpoint
    once it exists, curriculum two_gate → three_gate_turn.
+
+## 6. Floater cleanup (rev 2026-07-07 night)
+
+The checkpoint carries classic 3DGS "floaters" — gaussians hanging in
+free space where nothing physical exists. User-visible in the pre-cleanup
+renders (old hires/QA set): **blue blobs around the gate bottom** (the
+headline artifact), a blue haze band in front of the door wall, blue
+streaks crossing the +x shelves (hiding a drone model), grey-blue fog
+clouds in mid-air, and blue wisps INSIDE the gate opening — the last
+being copied into **every duplicate** by `duplicate_gate` (GATE_BOX
+contains the opening air).
+
+### 6.1 Where the fuzz actually lives (point-cloud probe)
+
+In gate-frame meters (z DOWN, mat surface z≈+0.855): the interior flight
+volume (|x|<1.9, y∈(−2.7,2.9), z∈(−1.6,0.78), gate box excluded) holds
+only ~12.7k of 1.61 M gaussians, **87% of them mat-blue**. There is NO
+content at z∈[0.30,0.60) near the gate — the fuzz is a hover layer at
+z∈[0.60,0.85] (5–25 cm above the mat) plus sparse mid-air wisps
+(median opacity 0.04). Critically, in the view-extrapolated −y region
+the *visual mat surface itself* is reconstructed 10–30 cm high: recolor
+probes show the deep-−y hover layer painting the rendered mat, so it is
+**load-bearing** and must largely stay (a wholesale "delete above the
+mat plane" would hole out the mat past gate 1).
+
+### 6.2 Deletion mask (`scene_edit.clean_floaters`)
+
+Pure deterministic function of positions/colors/opacities (recomputed at
+load, ~ms, nothing persisted). bexc = blue − max(red,green) on band-0 SH
+colors; val = max(r,g,b); union of five conservative groups:
+
+| group | region (gate-frame m) | color/opacity gates | n |
+|---|---|---|---|
+| mid-air fog | interior, −1.6≤z<0.30 | val≥0.25 (dark kept: cables) | 297 |
+| near-gate hover | interior, r_xy<1.35, 0.30≤z<0.80 | bexc>0.03 OR val<0.25 | 3,297 |
+| gate-box fuzz | GATE_BOX ±0.10 | bexc>0.05 AND val<0.75 | 4,141 |
+| door haze | x(0,1.9), y[−3.30,−2.75), z(−1.3,0.55) | bexc>0.05 | 274 |
+| far −y halo | interior, y<−1.35, 0.30≤z<0.68 | bexc>0.03 AND op<0.35 | 1,832 |
+
+Union **9,768 gaussians = 0.606%** of the scene. "Interior" always
+excludes the (inflated) gate box; everything at z≥0.80 (mat surface,
+tape lines, X-feet), all walls/roof/furniture, and dark content in
+mid-air (hanging cables) are untouchable by construction. The far-−y
+rule deletes only the low-opacity wisp halo and keeps the denser
+pseudo-mat layer (§6.1).
+
+Applied at the base of every scene: `clean_scene()` (pristine → HoverEnv
+default renderer), `multi_gate_scene()` cleans BEFORE extraction, so
+duplicates inherit clean openings — extraction yields 39,305 of the
+previous 41,405 gaussians (2,100 blue-fuzz gaussians no longer ship with
+each copy). Per composed scene the total removed is 9,768 (single),
++2,100 per duplicate avoided. `scene_edit.py` __main__ asserts:
+determinism, <1.1% budget, and zero overlap with non-blue gate-box
+content (ring/fabric/legs can never be eaten).
+
+### 6.3 Visual verification (before/after)
+
+Iterated in 3 rounds with recolor-highlight diagnostics, then
+before/after renders + pixel-diff heatmaps at 512×384 from 13 views
+(start box, gate-bottom close-ups, oblique, door, shelves, mat-wide,
+composed two-/three-gate tracks). Verdict:
+
+- blue gate-bottom blobs, opening wisps, door haze, shelf streaks,
+  mid-air fog: **gone** in all views (a drone model on the +x shelf is
+  now visible that the streaks used to cover);
+- preserved (pixel-diff-checked): mat texture + tape lines + white
+  markings, mat stack, walls + whiteboards + cardboard, roof + lights +
+  conduit, shelves/desk/chair/extinguisher, the hanging cables, the blue
+  towel, background mini-gates;
+- removing the blue veil exposed dark speckles floating over the mat
+  seam behind the gate — the near-gate rule's val<0.25 branch removes
+  those too; residual dashes ON the seam (z≥0.80) are real mat texture;
+- known leftovers (out of scope by design): grey wall/roof-adjacent fog
+  at the arena perimeter (outside the flight volume; deleting risks
+  wall texture) and the mat-level dark blotches in deep −y (surface
+  content of the extrapolated pseudo-mat).
+
+Evidence strips (before|after): `pixel2ctbr/spike_out/floater_cleanup/`
+(door haze, gate bottom, shelf streaks, mat-wide, per-track gate-bottom
+close-ups, policy-eye). Fresh full sets: QA
+`spike_out/multigate/` + hires `spike_out/multigate_hires/` (now
+includes `single_gate_bottom.png`; regenerate with
+`python pixel2ctbr/spike_multigate.py crop|two|three|hires`).
+
+**Policy-eye check** (128×96 gray, DR off, 4 poses along the approach):
+mean |diff| 0.2–0.4% of range, mean-intensity shift ≤+0.003, diffs
+localized to removed junk — training-input statistics unchanged except
+the floaters.
+
+### 6.4 Regressions & throughput
+
+Oracles re-run after the cleanup landed in the env scene path: two-gate
+**100%** (seed 5, B=256) and three-gate **100%**, zero strikes, exit err
+~3 mm — matching §4 (dynamics never see gaussians; the state-only path
+is untouched). `scene_edit.py` __main__: ALL PASS. Throughput at
+training settings (128×96 ss=2 gray, B=8, idle GPU): raw 666 ↔ cleaned
+601–630 img/s — **unchanged within run-to-run noise** (±5%, ordering/
+thermal); the 0.6% gaussian delta is too small to matter. Two-gate 604,
+three-gate 554 img/s (idle-GPU numbers; the §4 figures were taken while
+sharing the GPU with a training run).
+
+### 6.5 Showcase orbit videos
+
+`python pixel2ctbr/showcase_video.py [single|two|three|all]` renders
+slow 360° orbits of each cleaned scene to
+`pixel2ctbr/spike_out/showcase/{single,two_gate,three_gate_turn}.mp4`
+(gitignored; 1024×768 calibrated fisheye — the twin's honest camera —
+24 s / 720 frames @ 30 fps each, h264 yuv420p +faststart). The arena is
+a walled room, so instead of a circle beyond the outermost gate the
+camera flies a constant-rate ELLIPSE fitted inside the safety nets
+(closest ring approach ≥0.95 m), 0.45 m above gate height, gently
+pitched at the track center, starting on the well-captured +y side; the
+−y arc honestly shows the §5.1 extrapolation softness. Framing was
+verified with 8-pose probes per scene before encoding; GPU-frugal
+(chunk≤2, OOM retry, yields to co-resident processes).
