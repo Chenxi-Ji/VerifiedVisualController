@@ -1,8 +1,9 @@
 """Milestone-2 v1: N-gate tracks in the FalconGym-edited splat twin.
 
 Generalizes env_transit.py's phase machine to a WAYPOINT LIST over N gates
-(gate 0 = the real splat gate at the origin; gates 1.. are scene_edit
-duplicates composited into the renderer's scene). Per gate i:
+(gate REAL_GATE — in traversal order — is the real splat gate at the
+origin; every other entry is a scene_edit duplicate composited into the
+renderer's scene). Per gate i:
 
   c_i  center [m]; phi_i yaw of the gate about z (0 = original);
   n_i = Rz(phi_i) @ (0,1,0)  approach-side plane normal;
@@ -32,7 +33,7 @@ import math
 
 import torch
 
-from dynamics import euler_zyx_from_quat
+from dynamics import euler_zyx_from_quat, quat_from_euler_zyx
 from env import EnvConfig, HoverEnv
 
 
@@ -48,17 +49,29 @@ class MultiGateEnv(HoverEnv):
     FRAME_R = 0.75       # m: half-extent counted as "hit the frame"
     EVAL_T = 640         # control steps (16 s) for policy transit evals
 
-    # [(center_m, gate_yaw_rad)], gate 0 MUST be ((0,0,0), 0.0) (the real one)
+    # [(center_m, gate_yaw_rad)] in traversal order; entry REAL_GATE MUST be
+    # ((0,0,0), 0.0) (the real splat gate — not necessarily passed first)
     GATES: list = []
+    REAL_GATE = 0        # index of the real gate within GATES
+
+    # start box in gate-1's APPROACH frame, meters (x across the approach,
+    # y along +n_1 measured from the gate-1 plane, z about gate height).
+    # Defaults = HoverEnv's native box; envs whose first gate is a duplicate
+    # (REAL_GATE > 0) may shrink it to stay on the arena mat.
+    START_X = 1.275
+    START_Y = (0.425, 2.55)
+    START_Z = (-0.425, 0.34)
 
     def __init__(self, cfg: EnvConfig, renderer=None, image_dr: bool = True):
-        assert tuple(self.GATES[0][0]) == (0.0, 0.0, 0.0) and self.GATES[0][1] == 0.0
+        rg = self.GATES[self.REAL_GATE]
+        assert tuple(rg[0]) == (0.0, 0.0, 0.0) and rg[1] == 0.0
         if renderer is None:
             # composite the duplicated gates into the splat scene once
             import scene_edit as se
             from render_bridge import SplatRenderer
             scene = se.multi_gate_scene(
-                [se.gate_pose(c, y) for c, y in self.GATES[1:]])
+                [se.gate_pose(c, y) for i, (c, y) in enumerate(self.GATES)
+                 if i != self.REAL_GATE])
             renderer = SplatRenderer(
                 width=cfg.width, height=cfg.height, device=cfg.device,
                 mount_jitter_rad=0.5 * torch.pi / 180, intrinsics_jitter=1.0,
@@ -102,6 +115,29 @@ class MultiGateEnv(HoverEnv):
     def reset(self, vel_range=0.5):
         s = super().reset(vel_range)
         B, dev, n = self.cfg.B, self.cfg.device, self.n_gates
+        (c1x, c1y, c1z), phi1 = self.GATES[0]
+        if phi1 != 0.0 or c1x != 0.0 or c1y != 0.0 or c1z != 0.0:
+            # HoverEnv's start box serves a gate at the origin facing +y;
+            # when the FIRST gate of the track is elsewhere (REAL_GATE > 0),
+            # resample the pose in gate 1's approach frame (START_* box,
+            # rotated by phi1 about z, shifted to c_1) so every episode
+            # still begins on gate 1's +n side. Legacy tracks (gate 1 = the
+            # origin gate) skip this branch and stay bit-exact.
+            g = self.g
+            u = lambda lo, hi: (lo + (hi - lo) * torch.rand(B, generator=g)).to(dev)
+            p = torch.stack((u(-self.START_X, self.START_X),
+                             u(*self.START_Y), u(*self.START_Z)), dim=-1)
+            cp, sp = math.cos(phi1), math.sin(phi1)
+            R = torch.tensor([[cp, -sp, 0.0], [sp, cp, 0.0], [0.0, 0.0, 1.0]],
+                             device=dev)
+            p = p @ R.T + torch.tensor([c1x, c1y, c1z], device=dev)
+            q = quat_from_euler_zyx(self.tgt_yaws[0] + u(-0.6, 0.6),
+                                    u(-0.1, 0.1), u(-0.1, 0.1))
+            v = torch.stack([u(-vel_range, vel_range) for _ in range(3)], -1)
+            self.state = self.dyn.make_state(p, v, q,
+                                             torch.zeros(B, 3, device=dev),
+                                             self.params)
+            s = self.state
         self.phase = torch.zeros(B, dtype=torch.long, device=dev)
         self.crossed_ok = torch.zeros(B, n, dtype=torch.bool, device=dev)
         self.crossed_bad = torch.zeros(B, n, dtype=torch.bool, device=dev)
