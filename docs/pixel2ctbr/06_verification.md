@@ -91,6 +91,21 @@ crossing step gets its own measured checkpoint.*
    (convergence, action traces, latency measurement from logs); feed
    measured latency/τ back into DynParams and retrain if outside DR.
 
+## C2. Eval-protocol revision queue (apply together, then re-baseline)
+
+Changes that would make new eval tables incomparable with the
+v10/v13/v14 ones — batched here deliberately, to apply in ONE protocol
+revision alongside the next DR update:
+
+1. **Crash threshold z > 1.2 m is ~35 cm below the real floor**: the
+   multi-gate scene work measured the mat at gate-frame z ≈ +0.855 m
+   (gate_mocap.json + scene z-histogram) — the 1.2 m value predates that
+   measurement. Impact on existing tables ≈ none (crash rates were ~0 and
+   training uses fixed windows, not termination), but the honest threshold
+   is z > ~0.7 (floor minus prop radius). 
+2. Wide-delay DR (v14's train-time 25–125 ms) promoted into the standard
+   eval DR once flight logs confirm the real latency envelope.
+
 ## D. Known-unknowns being carried (with owner)
 
 - Tracking-cam calibration (K, fisheye coeffs, mount extrinsics) — required
