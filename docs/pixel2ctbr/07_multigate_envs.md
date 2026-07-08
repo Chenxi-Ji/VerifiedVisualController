@@ -5,6 +5,10 @@ multi-gate tracks using splat-scene editing. Everything here is verified by
 code in the repo; renders in `pixel2ctbr/spike_out/multigate/` (gitignored —
 regenerate with `python pixel2ctbr/spike_multigate.py [crop|two|three|bench]`).*
 
+*Rev 2026-07-07 (evening): crop box z-max 0.60 → 0.82 (duplicates' sliced
+bottoms fixed — §2) and the three-gate arc re-anchored with the real gate in
+the MIDDLE (old gate 3 pressed against the safety net — §3). Oracles re-run.*
+
 ## 0. Summary
 
 The arena splat contains exactly one gate. FalconGym 2.0's editable-gsplat
@@ -12,11 +16,14 @@ trick — box-select an object's gaussians in a metric frame, copy, rigidly
 transform, concatenate — gives us N-gate tracks from the one measured gate
 without recapturing or retraining the twin. `scene_edit.py` implements that
 recipe against our scene tuple; `env_multigate.py` generalizes the transit
-phase machine to a waypoint list over N gates; `env_two_gate.py` /
+phase machine to a waypoint list over N gates (the real gate may sit at any
+index of the track — `REAL_GATE`); `env_two_gate.py` /
 `env_three_gate_turn.py` are the first two tracks. Expert oracle: 99.6–100%
-(two-gate, seeds 5/1/11/42) and 100% (three-gate) clean transits on the
-randomized plant. Rendering cost: −8% (two-gate) / −21% (three-gate) img/s
-vs pristine at training settings.
+(two-gate, seeds 5/1/11/42) and 100% (three-gate, same four seeds) clean
+transits on the randomized plant. Rendering cost at training settings:
+−22% (two-gate) / −17% (three-gate) img/s vs pristine (GPU shared with the
+v14 run; three-gate is cheaper than two-gate because its upstream gate is
+behind the camera for most of the track).
 
 ## 1. FalconGym 2.0 survey (both local copies read)
 
@@ -55,23 +62,37 @@ What we did differently (`scene_edit.py`):
 
 ## 2. Gate extraction (crop box)
 
-`GATE_BOX = ((−0.72, 0.72), (−0.28, 0.28), (−0.72, 0.60))` gate-frame
-meters → **38,839 gaussians (2.41%** of 1.61 M). Iterated visually
-(`spike_multigate.py crop`): the box takes the octagonal ring, checkered
-tape, outer wire hoop and mounting collar; the z-DOWN cut at +0.60 m
-**excludes the stand legs** (they run to the floor at z≈+1.2) — including
-them would drag a floor rectangle along with every copy (a floating blue
-patch under each duplicate; the task brief's predicted failure mode,
-confirmed as the right call). Consequences, both accepted:
-- the original gate keeps its legs (they were never part of the mask's
-  copy); deletion QA shows leg stubs + intact background, no holes;
-- **duplicates float** (ring only, no stand). Cosmetically obvious in
-  renders, irrelevant to the task geometry.
+`GATE_BOX = ((−0.72, 0.72), (−0.28, 0.28), (−0.72, 0.82))` gate-frame
+meters → **41,405 gaussians (2.57%** of 1.61 M). The original cut at
+z-max **+0.60 sliced the duplicates' bottoms** (user-visible): the outer
+wire hoop closes at z≈+0.72, so every copy lost the lower hoop arc, the
+bottom orange marker and the mounting collar — bare bottom segment with
+wire stubs. Fixing it exposed a wrong prior: the floor is **not** at
+z≈+1.2 — the mocap calibration (gate_mocap.json) puts the gate center
+0.855 m above the floor, and the whole-scene z-histogram peaks at
+z≈+0.86 (mat surface; the counts below are reconstruction fuzz). So the
+stand is short: collar ≈+0.6→0.7, legs +0.70→0.86, X-feet + tape lines
+ON the mat at ≈+0.83–0.88.
+
+z-max iterated visually at 640×480 close-ups (original beside + behind a
+copy), with per-increment pixel diffs to attribute what each cut adds:
+- **+0.72** restores hoop arc + collar + bottom marker (the big delta);
+- **+0.78 → +0.82** adds exactly the lower leg ends (diff pixels sit at
+  the leg bottoms) — legs end ~3 cm above the mat, copies look grounded;
+- **+0.86** starts dragging **mat/tape-line fragments** (diff pixels lie
+  ON the mat around the base) — the floor-patch failure mode, rejected.
+
+z-max = **0.82** chosen. Consequences: duplicates no longer float — they
+carry ring + hoop + collar + near-full legs and read as standing on the
+mat (feet rods and their tape shadows stay behind — invisible at flight
+viewing distances, verified in the two/three-track renders + 1024×768
+hires samples). Deletion QA still shows intact background (feet + mat
+remain, no holes).
 
 Duplication fidelity (crop + two/three renders): rings crisp at all tested
 view angles, checkered texture intact, no smearing added by the copy
 itself. Residual physics: sh_degree-0 splats have **baked lighting** — a
-rotated duplicate carries the original's illumination (the 40°/80° gates
+rotated duplicate carries the original's illumination (the ±40° gates
 are lit as if facing +y). Visually minor at our angles.
 
 ## 3. Environments
@@ -88,6 +109,12 @@ are lit as if facing +y). Visually minor at our angles.
   gate k's own plane coordinates** and latches k+1. `tgt_p`/`tgt_yaw` are
   phase-indexed properties, so the expert, losses and HoverEnv machinery
   retarget transparently (env_transit pattern).
+- **Start box**: HoverEnv's box serves a gate at the origin facing +y;
+  when the track's FIRST gate is a duplicate elsewhere (`REAL_GATE > 0`)
+  reset resamples the pose in gate 1's approach frame (`START_X/Y/Z`
+  meters, rotated by φ₁, shifted to c₁, yaw ψ₁ ± 0.6) so every episode
+  starts on gate 1's +n side. Tracks whose first gate IS the origin gate
+  skip the branch and stay bit-exact with the previous behavior.
 - **Crossing detection**: signed plane offset s_k = n_k·(p−c_k) flipping
   +→−; in-plane offset <0.30 m = clean, <0.75 m = frame strike (`FRAME_R`,
   **new vs env_transit**: once gate planes are oblique, an infinite-plane
@@ -108,13 +135,23 @@ Second gate at (0, −2.2, 0), same orientation; exit at y=−3.0 m.
 
 ### Three-gate 40° turn (`env_three_gate_turn.py`)
 Gates on a circular arc toward +x: heading change 40°/gate (spec 30–40°),
-chord 2.0 m (spec 2.0–2.5): c₂=(0.684,−1.879), φ₂=40°; c₃=(2.416,−2.879),
-φ₃=80°; exit (3.204,−3.018). Chords sit TURN/2 = 20° off the transit
-heading, so the next gate is ~20° off the optical axis at each pass —
-deep inside the 146° fisheye FOV (renders confirm: gate 3 visible
-*through* gate 2's opening from wp₂). Turning toward +x keeps the track as
-shallow in −y as the spec allows (y ≥ −3.0 m vs −5.2 m for a straight
-3-gate line) and points the exit view at the well-captured +x arena side.
+chord 2.0 m (spec 2.0–2.5), **real gate anchored in the MIDDLE**
+(`REAL_GATE = 1`; v2 — it used to be first): c₁=(0.684,+1.879), φ₁=−40°
+(duplicate, passed first, on the +y approach side); c₂=(0,0), φ₂=0 (the
+real gate); c₃=(0.684,−1.879), φ₃=+40°; exit (1.198,−2.492). The v1
+anchoring ran the arc to c₃=(2.416,−2.879) / exit (3.204,−3.018) —
+**pressed against the +x/−y safety net**: probe renders put the mat/net
+boundary at roughly x∈[−2.3,+2.5], y∈[−3.3,+3.5], and the old pre-g3
+hires frame shows the net hugging the gate. Re-anchoring recenters the
+whole track (extremes wp₁ (1.13,+2.41) and exit (1.20,−2.49), ≥~1 m
+inside the net) with the same turn/chord. Start box: `START_X = ±1.0 m`,
+runway `START_Y = (0.45, 1.25) m` in gate-1's frame — rotated corners
+(worst ~(0.7, 3.5)) stay on the mat, in well-captured +y splat space.
+Chords sit TURN/2 = 20° off the transit heading, so the next gate is
+~20° off the optical axis at each pass — deep inside the 146° fisheye
+FOV (renders confirm: gates 2 AND 3 visible *through* gate 1's opening
+from wp₁). Turning toward +x keeps the track shallow in −y and points
+the exit view at the well-captured +x arena side.
 
 ## 4. Verification
 
@@ -124,11 +161,15 @@ shallow in −y as the spec allows (y ≥ −3.0 m vs −5.2 m for a straight
 |---|---|---|---|---|---|
 | two-gate, seed 5 | 16 s | 100% | 100% | 0 | 0.31 cm |
 | two-gate, seeds 1/11/42 | 16 s | 99.6/100/99.6% | 100% | 0.39/0/0.39% | 0.33 cm |
-| three-gate, seed 5 | 20 s | 87.5% | 100% | 0 | 6 cm |
-| three-gate, seed 5 | **22 s** | **100%** | 100% | 0 | 0.34 cm |
+| three-gate v2, seeds 5/1/11/42 | 22 s | **100% (all four)** | 100% | 0 | 0.27–0.34 cm |
 
-- The three-gate 20 s "failures" were purely unsettled braking (err_p95
-  2.7 cm and v_p95 0.037 m/s by 22 s) → EVAL_T = 880 (22 s).
+- Re-run after the crop/REAL_GATE changes: the two-gate seed-5 numbers are
+  **bit-identical** to v1 (its code path is untouched and dynamics never
+  see the gaussians); three-gate v2 is clean on every seed — the shrunk
+  rotated start box has no far-corner pocket, so even the 1/256 overshoot
+  strike the two-gate box exhibits doesn't arise.
+- EVAL_T = 880 (22 s) retained from v1 (at 20 s the slowest DR plants were
+  still braking at the exit: 87.5% → 100% with all-clean either way).
 - The two-gate residual (1/256 on two seeds): a far-corner start with
   initial velocity pointing away overshoots wp₀ **through** the gate plane
   at |x| = 0.39 m — inside the frame annulus → billed as a strike; the
@@ -137,17 +178,24 @@ shallow in −y as the spec allows (y ≥ −3.0 m vs −5.2 m for a straight
   infinite!); left as-is, ≥97% gate holds.
 
 **Visual gate** (512×384 color frames along each waypoint chain, 7 + 9
-frames): all duplicated rings render clean; the next gate is in-frame at
-every pass; policy-eye check (128×96 gray, DR'd, `30_policy_eye…png`)
-shows gate 2 visible inside gate 1's opening. Worst frame: two-gate
-**exit** (y=−3.0 m facing −y) — heavily smeared view-extrapolated
-close-range content; three-gate exit (facing +x) is markedly better.
+frames, plus 1024×768 hires samples in `spike_out/multigate_hires/`): all
+duplicated rings render clean **with complete bottoms** (closed hoop +
+collar + legs, §2); the next gate is in-frame at every pass — from wp₁ of
+the turn track gates 2 and 3 are both visible through gate 1's opening;
+policy-eye check (128×96 gray, DR'd, `30_policy_eye…png`) shows gate 2
+inside gate 1's opening. Re-anchoring also fixed the worst v1 frame: the
+old `threegate_past_g1` hires (camera just past the origin gate, deep
+−y-facing extrapolation) was an unusable smear — its v2 counterpart sits
+in well-captured +y space and is crisp. Remaining worst frame: two-gate
+**exit** (y=−3.0 m facing −y), unchanged; the turn track's exit
+(y=−2.5 m, facing +x−y) is markedly better.
 
-**Throughput** (128×96 ss=2 gray, B=8, chunk=8, GPU shared with the v13
-training run): pristine 400 img/s → two-gate 367 (−8%) → three-gate 316
-(−21%). Slowdown outruns the gaussian count (+2.4%/+4.8%) because gate
-pixels are the expensive ones and every view now holds more of them. Still
-≥ the 295 img/s design number (04 §1).
+**Throughput** (128×96 ss=2 gray, B=8, chunk=8, GPU shared with the v14
+training run): pristine 432 img/s → two-gate 338 (−22%) → three-gate 359
+(−17%). Slowdown outruns the gaussian count (+2.6%/+5.1%) because gate
+pixels are the expensive ones; the v2 turn track is *cheaper* than
+two-gate because its upstream gate is behind the camera for most poses.
+Still ≥ the 295 img/s design number (04 §1).
 
 **Trainer**: `--task two_gate|three_gate_turn` wired (env selection,
 EVAL_T-aware eval, perception term aimed at the current phase's gate);
@@ -167,8 +215,9 @@ test_render_bridge ALL PASS).
    disambiguates gate 2 from gate 1 except context/geometry; the GRU +
    phase-consistent trajectories must carry that. If aliasing bites in
    training, per-duplicate slight color/scale jitter is a one-line edit.
-3. **Baked lighting** on rotated duplicates (§2); no shadows under
-   floating rings.
+3. **Baked lighting** on rotated duplicates (§2); duplicates stand on
+   near-full legs since the z-max 0.82 crop but still cast no shadow and
+   carry no feet rods — invisible at flight distances.
 4. Phase machine + crossing bookkeeping read privileged state — training
    scaffolding only, as in env_transit; nothing new leaks to the policy.
 5. Oracle residual: the 1/256 pre-commit overshoot strike (§4). A

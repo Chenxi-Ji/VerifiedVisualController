@@ -559,3 +559,29 @@ two-gate exit (y=−3 m facing −y, smeared extrapolation — braking phase
 only); three-gate exit faces +x and is much better. Throughput at training
 settings: 400→367→316 img/s (pristine/two/three; −8%/−21%, still ≥ the 295
 img/s design number).
+
+## 2026-07-07 (evening) — crop-box bottom fix + three-gate re-anchor
+
+User feedback on the multi-gate scenes, two fixes (07 doc §2/§3 updated).
+(1) Duplicated gates were visibly sliced at the BOTTOM: the outer wire
+hoop closes at gate-frame z≈+0.72, so the +0.60 crop cut the lower hoop
+arc, bottom marker and collar off every copy. Iterating z-max with
+close-up renders + per-increment pixel diffs exposed a wrong prior — the
+floor mat is at z≈+0.855 (mocap-confirmed), not 1.2: legs are short
+(0.70→0.86) and the X-feet/tape lines lie ON the mat, so +0.86 already
+drags mat/tape fragments under copies (the floor-patch failure mode) while
++0.82 adds exactly the leg ends. GATE_BOX z-max 0.60 → **0.82** (38,839 →
+41,405 gaussians, 2.57%): duplicates now carry ring + hoop + collar +
+near-full legs ending ~3 cm above the mat — grounded look, no patch.
+(2) The turn track's last gate pressed against the +x/−y safety net (old
+c₃ (2.42,−2.88), exit (3.20,−3.02); mat/net at ~x∈[−2.3,2.5], y∈[−3.3,3.5]
+from splat probes). Re-anchored the arc with the REAL gate as the MIDDLE
+gate (env_multigate REAL_GATE; upstream duplicate (0.684,+1.879) at −40°,
+downstream (0.684,−1.879) at +40°, same 40°/2.0 m arc): extremes now wp₁
+(1.13,+2.41) / exit (1.20,−2.49), ≥~1 m inside the net; start box
+re-expressed in gate-1's approach frame (±1.0 m × 0.45–1.25 m runway,
+rotated corners on-mat). Oracles: two-gate bit-identical (100%, seed 5);
+three-gate v2 **100% on seeds 5/1/11/42**, zero strikes, exit err ~3 mm.
+Bonus: the old threegate_past_g1 hires frame (unusable −y smear) is now a
+crisp +y-space view; QA + 1024×768 hires renders regenerated. Throughput
+432/338/359 img/s (pristine/two/three, v14 sharing the GPU) ≥ design 295.
