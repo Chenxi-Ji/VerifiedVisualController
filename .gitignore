@@ -4,3 +4,6 @@ __pycache__/
 auto_LiRPA/
 backups/
 pixel2ctbr/spike_out/
+pixel2ctbr/
+docs/pixel2ctbr/
+weights/pixel_ctbr*
