@@ -61,7 +61,12 @@ class ExportWrapper(torch.nn.Module):
         return torch.cat((c, w_), dim=-1), h2
 
 
-def export(weights, out_dir="weights", steps=1000):
+def export(weights, out_dir="weights", steps=1000, out_base=None):
+    """out_base: basename for the artifacts (default: derived from the
+    weights filename, e.g. pixel_ctbr_two_gate.pt -> pixel_ctbr_two_gate)."""
+    if out_base is None:
+        b = os.path.splitext(os.path.basename(weights or ""))[0]
+        out_base = b if b.startswith("pixel_ctbr") else "pixel_ctbr"
     torch.manual_seed(0)
     m = PixelCTBRPolicy()
     if weights and os.path.exists(weights):
@@ -74,7 +79,7 @@ def export(weights, out_dir="weights", steps=1000):
     hid = m.hidden
     mx = ExportWrapper(m).eval()
 
-    onnx_path = f"{out_dir}/pixel_ctbr.onnx"
+    onnx_path = f"{out_dir}/{out_base}.onnx"
     torch.onnx.export(
         mx, (torch.zeros(1, m.frames, H_IMG, W_IMG), torch.zeros(1, VEC_DIM),
              torch.zeros(1, hid)),
@@ -82,13 +87,13 @@ def export(weights, out_dir="weights", steps=1000):
         input_names=["image", "vec", "h_in"], output_names=["action", "h_out"])
 
     import onnx2tf
-    sm = f"{out_dir}/pixel_ctbr_sm"
+    sm = f"{out_dir}/{out_base}_sm"
     shutil.rmtree(sm, ignore_errors=True)
     onnx2tf.convert(input_onnx_file_path=onnx_path, output_folder_path=sm,
                     disable_group_convolution=True, non_verbose=True)
-    tfl = f"{sm}/pixel_ctbr_float16.tflite"
+    tfl = f"{sm}/{out_base}_float16.tflite"
     assert os.path.exists(tfl), "onnx2tf did not emit fp16 tflite"
-    final = f"{out_dir}/pixel_ctbr.tflite"
+    final = f"{out_dir}/{out_base}.tflite"
     shutil.copy(tfl, final)
     print(f"exported {final} ({os.path.getsize(final)/1024:.0f} KB)")
 
