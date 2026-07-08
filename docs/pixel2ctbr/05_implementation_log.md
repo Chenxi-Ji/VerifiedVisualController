@@ -500,6 +500,21 @@ BOTH v13-best (pixel_ctbr_final5.pt) and v10-best (pixel_ctbr_final2.pt) —
 v10-best never had its own definitive pass (the earlier 69.1% table was the
 first polish checkpoint). Winner becomes the exported tflite.
 
+## 2026-07-07 (later) — v13-vs-v10 definitive + v14 closes milestone 1
+
+Definitive tables (06 §B): v13 82.8%/3.5 cm but brittle (no-tilt −10.7,
+delay+1 −20.9 — its faster approaches spend the latency margin); v10
+84.0%/5.6 cm with a flat robustness profile. **v14** = v13-best + train-time
+wide-delay DR (25–125 ms; evals unchanged for comparability) + constant ring
+weight: best-of-both — **84.2% / 3.1 cm base, delay sensitivity halved
+(−10.0), gain-edges and DR-off best-in-family; in-run 12 s gates hit 95.8%
+(p95 5.7 cm) twice**. Chosen as the flight deliverable; re-exported
+(parity 6.7e-3) and shipped to Starling2 (`cb17430`). The 8 s strict gate
+stands at ~84% — the residual is an arrival-speed tail on far/awkward
+starts; next levers if sim-side push resumes: even wider delay DR promoted
+into eval, speed-cap tuning, or accepting 10–12 s as the operational
+convergence budget (12 s meets the 95% bar).
+
 - Definitive 512-episode eval + ablations: see 06_verification.md §B
   (base 69.1% / 9.5 cm / 0 crashes; DR-off ≈ base ⇒ no twin-overfit;
   graceful degradation on no-tilt / +latency / gain-edges).

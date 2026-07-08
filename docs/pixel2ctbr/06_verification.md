@@ -49,16 +49,28 @@ crossing step gets its own measured checkpoint.*
   | image-DR off | 80.5% | 77.7% |
   Crashes ≈ 0 across all 5120 episodes.
 
-  **Flight deliverable: v10-best (`weights/pixel_ctbr_final2.pt`)** — the
-  headline is a statistical tie, but v13 bought its 3.5 cm precision with
-  brittleness (tilt-dependent, 3× the latency sensitivity — its faster
-  approaches spend the latency margin). Robustness wins for hardware; the
-  exported `pixel_ctbr.tflite` in Starling2 is already built from v10-best
-  (parity 4.8e-3). v13-best kept as the precision line; identified next
-  training lever: widen delay DR (train at 25–125 ms) to buy the margin
-  back, then re-run this table.
-  At 12 s horizons both models hover ~87–92% (peak gates 99%); the residual
-  8 s gap is arrival-speed for a minority of far/awkward starts.
+  ~~Flight deliverable: v10-best~~ (superseded below) — v13 bought its
+  3.5 cm precision with brittleness (tilt-dependent, 3× the latency
+  sensitivity); the identified lever was to widen delay DR and re-run.
+
+### v14 (train-time wide-delay DR 25–125 ms, from v13-best) — FINAL
+
+  | condition | v14 (final6) | v13 | v10 |
+  |---|---|---|---|
+  | base | **84.2% / 3.1 cm** | 82.8 / 3.5 cm | 84.0 / 5.6 cm |
+  | no-tilt | 77.7 (−6.5) | 72.1 (−10.7) | **83.4 (−0.6)** |
+  | delay +25 ms | 74.2 (−10.0) | 61.9 (−20.9) | **77.1 (−6.9)** |
+  | gain edges | **81.1** | 81.4 | 78.7 |
+  | image-DR off | **86.9** | 80.5 | 77.7 |
+
+  **Flight deliverable: v14-best (`weights/pixel_ctbr_final6.pt`)** — keeps
+  v13's precision (3.1 cm, 1.8× tighter than v10), best base rate, delay
+  brittleness halved to ~v10's level; remaining soft spot is no-tilt (the
+  fallback mode — the deployed helper ships a complementary tilt filter).
+  Exported `pixel_ctbr.tflite` rebuilt from v14 (parity 6.7e-3) and shipped
+  to Starling2 (`cb17430`). In-run 12 s gates reached **95.8% (p95 5.7 cm)**
+  twice; the 8 s strict gate remains at ~84% (arrival-speed tail on
+  far/awkward starts) — recorded as the honest state of milestone 1.
 - Export ✅ `weights/pixel_ctbr.tflite` 264 KB fp16; 1000-step closed-loop
   parity vs PyTorch: max action diff 5.4e-3 (≈0.06% of thrust span) — C1
   passed on desktop (on-device TFLite-2.8 re-check pending, C2).
