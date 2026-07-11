@@ -1,0 +1,22 @@
+{
+  "episodes": 240,
+  "crash_rate": 0.14166666666666666,
+  "n_crashed": 34,
+  "hold_err_median_m": 0.5305030941963196,
+  "hold_err_mean_m": 0.5645517064529715,
+  "hold_err_p90_m": 0.8503161072731018,
+  "hold_xy_err_median_m": 0.3348609209060669,
+  "hold_z_err_median_m": 0.37179648876190186,
+  "final_err_median_m": 0.643375426530838,
+  "success_hold_le_0.10m": 0.0,
+  "success_hold_le_0.20m": 0.024271844660194174,
+  "yaw_err_median_deg": 0.6001649070680387,
+  "horizon_s": 6.0,
+  "hold_window_s": 1.5,
+  "image_dr": false,
+  "plant_dr": true,
+  "unit_thrust_gain": true,
+  "seed": 0,
+  "weights": "weights/ctrl_lya_meansub_att.pt",
+  "eval_wall_s": 58.9
+}
