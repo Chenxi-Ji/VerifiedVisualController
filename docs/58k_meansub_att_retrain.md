@@ -196,3 +196,103 @@ Module self-tests: `python scripts_control/utils_ctrl_meansub_att.py`
 GPU etiquette (a campaign training shares this GPU): every entry point sets
 `torch.cuda.set_per_process_memory_fraction(SIDE_MEM_FRAC (default 0.25))`
 and defaults `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
+## TFLite export (2026-07-11)
+
+Same route as the original `ctrl_lya.tflite` export, run in the
+`certified_visual_controller` conda env (the "pftolite" name in the old
+docstrings is stale), all on CPU (`CUDA_VISIBLE_DEVICES=""`):
+
+**PyTorch -> ONNX (torch.onnx.export, opset 18, dynamo/torch.export path of
+torch 2.11) -> onnx2tf 1.29.24 SavedModel (`disable_group_convolution=True`)
+-> TF 2.19 TFLiteConverter.** The exported graph is the same FUSED model as
+the original: `FusedModel(ControllerMeansubAtt, LyapunovV(ckpt["lyapunov"]))`
+with inputs `image (1,192,256,3 NHWC)`, `pose (1,6)`, `target (1,6)` and
+outputs `action (1,4)`, `V (1,)` — byte-identical IO signature to
+`ctrl_lya.tflite`, so all existing tflite tooling works unchanged. Only the
+ACTION SEMANTICS differ: `[c m/s^2, roll_sp, pitch_sp, yaw_sp(abs)]` instead
+of `[vx, vy, vz, yaw_rate]`. No unsupported ops; the in-graph mean-subtract
+exports as a plain ReduceMean.
+
+| artifact | precision | size |
+|---|---|---|
+| `weights/ctrl_lya_meansub_att.tflite` | float16 weights (`Optimize.DEFAULT` + `supported_types=[tf.float16]`, same choices as `ctrl_lya.tflite`) | 131.4 KB |
+| `weights/ctrl_lya_meansub_att_f32.tflite` | float32 reference (no quantization) | 240.9 KB |
+
+Export script: `scripts_tflite/export_to_tflite_meansub_att.py` (thin variant
+of `export_to_tflite.py`, reuses its Step-2/3 helpers; original untouched).
+
+### Parity (pt vs tflite), `scripts_tflite/debug_pt_vs_tflite_meansub_att.py`
+
+Per-channel MAX abs delta; "norm" = delta / channel span
+(c: 0.9G = 8.83 m/s^2, tilt: 0.35 rad, yaw: pi rad).
+
+| input set | file | c | roll_sp | pitch_sp | yaw_sp | max norm |
+|---|---|---|---|---|---|---|
+| 256 random images | f16 | 2.4e-3 | 2.6e-5 | 3.0e-5 | 4.9e-4 | **2.8e-4** |
+| 256 random images | f32 | 1.0e-4 | 3.1e-6 | 6.9e-6 | 3.0e-6 | **2.0e-5** |
+| 21 real frames (real_t*.png + video samples) | f16 | 3.4e-3 | 2.0e-4 | 6.8e-5 | 5.3e-4 | **5.6e-4** |
+| 21 real frames | f32 | 6.0e-3 | 1.7e-4 | 7.9e-5 | 9.3e-5 | **6.8e-4** |
+| all 530 starling_video frames | f16 | 1.2e-2 | 3.0e-4 | 1.8e-4 | 5.6e-4 | **1.4e-3** |
+
+Lyapunov V (100 random pose/target pairs): max 2.5e-4 (f16), 9.5e-7 (f32).
+
+Acceptance (<1e-3 normalized, f32): PASS (2.0e-5 random, 6.8e-4 real). The
+f16 file matches on the PNG set (5.6e-4) and only exceeds 1e-3 on the
+worst thrust sample over the full 530-frame video sweep (1.4e-3 normalized =
+0.012 m/s^2 on a 8.8 m/s^2 span) — the expected f16 weight-quantization
+cost; use the f32 reference where <1e-3 is required. On real frames the f32
+delta is op-reassociation noise (ReduceMean/conv accumulation order), not
+quantization — it is the same order as f16 there.
+
+### Real-frame replay
+
+`replay_real_frame.py` runs UNCHANGED (pass the tflite path as argv); note
+its printed labels are the old velocity-head text — for this model read
+`[vx, vy, vz, yaw_rate]` as `[c m/s^2, roll_sp, pitch_sp, yaw_sp]`:
+
+| frame | c (m/s^2) | roll_sp | pitch_sp | yaw_sp |
+|---|---|---|---|---|
+| real_t0.0 (full + pre-resized identical) | 7.948 (0.81 g) | +0.175 | -0.005 | -1.594 |
+| real_t1.0 | 7.675 (0.78 g) | +0.163 | -0.017 | -1.591 |
+| real_t0.0_colorshift | 8.779 | +0.135 | -0.010 | -1.595 |
+
+Bounded, non-NaN, tilts well inside +-0.35, yaw pinned at -pi/2 (target
+heading), thrust slightly below hover — plausible for these frames.
+
+Video replay: `scripts_tflite/replay_real_video_meansub_att.py` (thin variant
+of `replay_real_video.py`: ControllerMeansubAtt on the pt side, attitude
+labels, thrust plotted as c/G-1, outputs suffixed `_meansub_att` so the
+original model's artifacts stay put). Over all 530 frames of
+`starling_video.mp4`: no NaN; c in [4.9, 11.6] m/s^2 (mean 9.06 = 0.92 g),
+roll_sp in [-0.14, +0.29], pitch_sp in [-0.06, +0.09], yaw_sp in
+[-1.60, -1.41] (mean -1.53). Artifacts:
+`starling_video_meansub_att_actions.{csv,png}`. (The clip's mp4 header
+claims 320 fps, so the t axis spans 1.66 s — same as the original model's
+`starling_video_actions.csv`.)
+
+The closed-loop reference numbers for this model remain the PyTorch eval in
+the table above / `logs/eval_ctrl_meansub_att*.json` (a tflite-in-the-loop
+sim eval was descoped).
+
+### Commands
+
+```bash
+cd ~/certified_visual_controller/VerifiedVisualController_small_clone
+PY=~/miniconda3/envs/certified_visual_controller/bin/python
+
+# 1. export (CPU): writes weights/ctrl_lya_meansub_att{,_f32}.tflite
+CUDA_VISIBLE_DEVICES="" $PY scripts_tflite/export_to_tflite_meansub_att.py
+
+# 2. parity: 256 random images + real frames + Lyapunov, per-channel deltas
+CUDA_VISIBLE_DEVICES="" $PY scripts_tflite/debug_pt_vs_tflite_meansub_att.py \
+    --tflite weights/ctrl_lya_meansub_att.tflite      # and _f32.tflite
+
+# 3. single-frame replay (existing script, unchanged)
+CUDA_VISIBLE_DEVICES="" $PY scripts_tflite/replay_real_frame.py \
+    real_t0.0_full.png weights/ctrl_lya_meansub_att.tflite
+
+# 4. video replay (tflite + pt side by side, CSV + plot)
+CUDA_VISIBLE_DEVICES="" $PY scripts_tflite/replay_real_video_meansub_att.py \
+    starling_video.mp4
+```
