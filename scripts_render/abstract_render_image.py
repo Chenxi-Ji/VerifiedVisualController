@@ -77,15 +77,6 @@ if __name__ == "__main__":
     cx = 158.868074
     cy = 98.837772
 
-    # width = width // 2
-    # height = height // 2
-    # fx = fx / 2
-    # fy = fy / 2
-    # cx = cx / 2
-    # cy = cy / 2
-    # pose_lb = np.array([0.1, -3.1, -0.1, 1.53, 0.0, 0.0])
-    # pose_ub = np.array([0.3, -2.9, -0.3, 1.60, 0.0, 0.0])
-
     pose_lb = np.array([0.09, -3.01, -0.02, 1.60, 0.0, 0.0])
     pose_ub = np.array([0.12, -2.97, -0.00, 1.60, 0.0, 0.0])
     

@@ -23,6 +23,21 @@ os.makedirs("figures", exist_ok=True)
 
 
 # =========================
+# Filter only unverified boxes
+# =========================
+unverified_boxes = [
+    box for box in verified_boxes
+    if not box["verified"]
+]
+
+print(f"Total boxes: {len(verified_boxes)}")
+print(f"Unverified boxes: {len(unverified_boxes)}")
+
+if len(unverified_boxes) == 0:
+    raise RuntimeError("No unverified boxes found. Nothing to plot.")
+
+
+# =========================
 # Helper functions
 # =========================
 def get_box_max_size(box):
@@ -52,6 +67,9 @@ def get_global_axis_limits(boxes):
         y_max - y_min,
         z_max - z_min,
     )
+
+    if radius <= 0:
+        radius = 1e-6
 
     x_lim = (x_mid - radius, x_mid + radius)
     y_lim = (y_mid - radius, y_mid + radius)
@@ -109,22 +127,31 @@ def setup_axis(ax, x_lim, y_lim, z_lim, title):
 
 # =========================
 # Shared axis limits
+# Use all boxes to keep the same global spatial range
+# If you want zoom-in view, replace verified_boxes with unverified_boxes
 # =========================
 x_lim, y_lim, z_lim = get_global_axis_limits(verified_boxes)
 
 
 # =========================
 # Cell size colormap
+# Only normalize over unverified cells
 # =========================
 cell_sizes = np.asarray(
-    [get_box_max_size(box) for box in verified_boxes],
+    [get_box_max_size(box) for box in unverified_boxes],
     dtype=np.float64,
 )
 
-size_norm = Normalize(
-    vmin=cell_sizes.min(),
-    vmax=cell_sizes.max(),
-)
+if np.isclose(cell_sizes.min(), cell_sizes.max()):
+    size_norm = Normalize(
+        vmin=cell_sizes.min() - 1e-12,
+        vmax=cell_sizes.max() + 1e-12,
+    )
+else:
+    size_norm = Normalize(
+        vmin=cell_sizes.min(),
+        vmax=cell_sizes.max(),
+    )
 
 size_cmap = cm.get_cmap("viridis")
 
@@ -140,9 +167,9 @@ ax_verify = fig.add_subplot(1, 2, 2, projection="3d")
 
 # =========================
 # Subfigure 1:
-# color by cell size
+# only unverified cells, colored by cell size
 # =========================
-for box, size in zip(verified_boxes, cell_sizes):
+for box, size in zip(unverified_boxes, cell_sizes):
     color = size_cmap(size_norm(size))
 
     draw_box(
@@ -155,8 +182,8 @@ for box, size in zip(verified_boxes, cell_sizes):
         box["z_ub"],
         facecolor=color,
         edgecolor="black",
-        alpha=0.45,
-        linewidth=0.2,
+        alpha=0.55,
+        linewidth=0.25,
     )
 
 ax_size.scatter(*target, c="red", s=70, marker="*", label="Target")
@@ -167,7 +194,7 @@ setup_axis(
     x_lim,
     y_lim,
     z_lim,
-    title="Pose Cell Partition: Colored by Cell Size",
+    title="Unverified Pose Cells: Colored by Cell Size",
 )
 
 ax_size.legend()
@@ -175,11 +202,9 @@ ax_size.legend()
 
 # =========================
 # Subfigure 2:
-# color by verified / unverified
+# only unverified cells, all red
 # =========================
-for box in verified_boxes:
-    color = "green" if box["verified"] else "red"
-
+for box in unverified_boxes:
     draw_box(
         ax_verify,
         box["x_lb"],
@@ -188,10 +213,10 @@ for box in verified_boxes:
         box["y_ub"],
         box["z_lb"],
         box["z_ub"],
-        facecolor=color,
-        edgecolor="black",
-        alpha=0.35,
-        linewidth=0.2,
+        facecolor="red",
+        edgecolor="red",
+        alpha=0.45,
+        linewidth=0.25,
     )
 
 ax_verify.scatter(*target, c="red", s=70, marker="*", label="Target")
@@ -202,7 +227,7 @@ setup_axis(
     x_lim,
     y_lim,
     z_lim,
-    title="Pose Cell Verification: Green=Verified, Red=Failed",
+    title="Unverified Pose Cells Only",
 )
 
 ax_verify.legend()
@@ -233,7 +258,9 @@ cbar.set_label("max(dx, dy, dz)")
 # =========================
 plt.tight_layout()
 
-save_path = f"figures/{filename}_partition_and_verification.png"
+save_path = f"figures/{filename}_unverified_partition_only.png"
 plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+print(f"Saved figure to: {save_path}")
 
 plt.show()

@@ -1,336 +1,343 @@
 import torch
 
-@torch.no_grad()
-def compute_bound_exp(x_lb, x_ub, eps= 1e-12):
-    exp_lb = torch.exp(-0.5 * x_lb) # (num_valid, tile_h, tile_w)
-    exp_ub = torch.exp(-0.5 * x_ub)
+def build_matrices(semi_A, semi_B):
+    A = semi_A @ semi_A.transpose(-1, -2)                 # (N,H,W,3,3)
+    B = semi_B[:, None, None] @ semi_B[:, None, None].transpose(-1, -2)  # (N,H,W,3,3)
+    return A, B
 
-    dx = (x_ub - x_lb).clamp_min(eps)
-    k = (exp_ub - exp_lb) / dx
 
-    b_ub = exp_lb - k * x_lb
+def q_func(x, A, B):
+    x = x.view(1,1,1,3,1)                                 # (1,1,1,3,1)
 
-    # b_lb = 2k(log(-2k) - 1)
-    neg_2k = (-2.0 * k).clamp_min(eps)
-    b_lb = 2.0 * k * (torch.log(neg_2k) - 1.0)
+    Ax = A @ x                                            # (N,H,W,3,1)
+    Bx = B @ x                                            # (N,H,W,3,1)
 
-    k_lb = k
-    k_ub = k
+    xAx = (x.transpose(-1,-2) @ Ax).squeeze(-1).squeeze(-1)  # (N,H,W)
+    xBx = (x.transpose(-1,-2) @ Bx).squeeze(-1).squeeze(-1)  # (N,H,W)
 
-    # handle degenerate interval x_lb == x_ub
-    mask_equal = (x_ub - x_lb).abs() < eps
-    if mask_equal.any():
-        x0 = x_lb[mask_equal]
-        y0 = exp_lb[mask_equal]
+    return -0.5 * xAx / (xBx + 1e-8)                      # (N,H,W)
 
-        # tangent at x0
-        k0 = -0.5 * y0
-        b0 = y0 - k0 * x0
 
-        k_lb = k_lb.clone()
-        k_ub = k_ub.clone()
-        b_lb = b_lb.clone()
-        b_ub = b_ub.clone()
+def render(q, opacities, colors):
+    w = opacities[:, None, None] * q                      # (N,H,W)
 
-        k_lb[mask_equal] = k0
-        k_ub[mask_equal] = k0
-        b_lb[mask_equal] = b0
-        b_ub[mask_equal] = b0
+    T = torch.ones_like(w[0])                             # (H,W)
+    out = torch.zeros((H:=w.shape[1], W:=w.shape[2], 3), device=w.device)
 
-    return k_lb, k_ub, b_lb, b_ub
+    for i in range(w.shape[0]):
+        wi = w[i]                                          # (H,W)
+        ci = colors[i]                                    # (3,)
+        out = out + wi[..., None] * T[..., None] * ci     # (H,W,3)
+        T = T * (1 - wi)                                  # (H,W)
 
-# previous alpha blending function (for reference)
-# @torch.no_grad()
-# def compute_alpha_blending(w, colors, threshold=1e-3):
-#     N, H, W = w.shape
-#     device, dtype = w.device, w.dtype
+    return out                                            # (H,W,3)
 
-#     T = torch.ones((H, W), device=device, dtype=dtype)
-#     rgb = torch.zeros((H, W, 3), device=device, dtype=dtype)
 
-#     for i in range(w.shape[0]):
-#         a = w[i]  # (tile_h, tile_w)
-#         c = colors[i]  # (3,)
+def taylor_bound(x0, X_lb, X_ub, f, samples=10):
 
-#         contrib = (a.unsqueeze(-1) * T.unsqueeze(-1)) * c  # (tile_h, tile_w, 3)
-#         rgb = rgb + contrib
-#         T = T * (1 - a)
+    # center + anisotropic radius
+    r = 0.5 * (X_ub - X_lb)                       # (3,)
+    x0 = x0.clone().detach().requires_grad_(True) # (3,)
 
-#         if (T < threshold).all():
-#             # print(f"early stop")
-#             break
+    f0 = f(x0)                                    # scalar
+    g = torch.autograd.grad(f0, x0)[0]           # (3,)
 
-#     return rgb
+    # ---- Hessian box bound (anisotropic) ----
+    M = 0.0
 
-@torch.no_grad()
-def compute_alpha_blending(w, colors):
-    N, H, W = w.shape
-    device, dtype = w.device, w.dtype
+    for _ in range(samples):
 
-    rgb = torch.zeros((H, W, 3), device=device, dtype=dtype)
+        x = X_lb + torch.rand_like(X_lb) * (X_ub - X_lb)   # (3,)
+        x.requires_grad_(True)
 
-    for i in range(w.shape[0]-1, -1, -1):
-        c = colors[i].view(1, 1, 3) # (1, 1, 3)
-        d = c - rgb # (H, W, 3)
-        rgb = rgb + d * w[i][..., None]
+        y = f(x)
+        grad = torch.autograd.grad(y, x, create_graph=True)[0]  # (3,)
 
-    # print(f"rgb.shape={rgb.shape}, rgb.min={rgb.min():.6f}, rgb.max={rgb.max():.6f}, rgb.mean={rgb.mean():.6f}")
+        Hv_sum = 0.0
 
-    return rgb
+        for i in range(3):
 
-@torch.no_grad()
-def compute_interval_bound_alpha_blending(w_lb, w_ub, colors):
-    N, H, W = w_lb.shape
-    device, dtype = w_lb.device, w_lb.dtype
+            ei = torch.zeros_like(x)
+            ei[i] = 1.0                                     # (3,)
 
-    rgb_lb = torch.zeros((H, W, 3), device=device, dtype=dtype)
-    rgb_ub = torch.zeros((H, W, 3), device=device, dtype=dtype)
+            gv = (grad * ei).sum()
+            hv = torch.autograd.grad(gv, x, retain_graph=True)[0]  # (3,)
 
-    for i in range(w_lb.shape[0]-1, -1, -1):
-        c = colors[i].view(1, 1, 3) # (1, 1, 3)
+            Hv_sum = Hv_sum + torch.abs(hv[i]) * r[i] * r[i]
 
-        d_lb = c - rgb_lb # (H, W, 3)
-        d_ub = c - rgb_ub
+        M = max(M, Hv_sum.item())
 
-        w_l = w_lb[i][..., None] # (H, W, 1)
-        w_u = w_ub[i][..., None]
+    # ---- final affine model ----
+    def L(x):
+        dx = x - x0                                       # (3,)
+        return f0 + (g * dx).sum() - 0.5 * M              # scalar
 
-        m_lb = (d_lb >= 0) # (H, W, 3) -> (H, W, 1) via broadcasting
-        w_sel_lb = torch.where(m_lb, w_l, w_u) # (H, W, 1)
-        rgb_lb = rgb_lb + d_lb * w_sel_lb # (H, W, 3)
+    def U(x):
+        dx = x - x0                                       # (3,)
+        return f0 + (g * dx).sum() + 0.5 * M              # scalar
 
-        m_ub = (d_ub >= 0)
-        w_sel_ub = torch.where(m_ub, w_u, w_l)
-        rgb_ub = rgb_ub + d_ub * w_sel_ub
+    return L, U, g, f0, M
 
-    return rgb_lb, rgb_ub
+def test_taylor_tightness():
 
+    torch.manual_seed(0)
 
-@torch.no_grad()
-def compute_linear_bound_alpha_blending(
-    w_lb, w_ub,
-    w_k_lb, w_k_ub,
-    w_b_lb, w_b_ub,
-    colors
-):
-    N, H, W = w_lb.shape
-    device, dtype = w_lb.device, w_lb.dtype
+    N, H, W = 20, 16, 16
 
-    rgb_lb = torch.zeros((H, W, 3), device=device, dtype=dtype)
-    rgb_ub = torch.zeros((H, W, 3), device=device, dtype=dtype)
+    semi_A = torch.randn(N,H,W,3,3)
+    semi_B = torch.randn(N,3,3).abs() + 0.5
+    opacities = torch.rand(N)
+    colors = torch.rand(N,3)
+    cam_const = torch.zeros(N,3)
 
-    rgb_k_lb = torch.zeros((N, H, W, 3), device=device, dtype=dtype)
-    rgb_k_ub = torch.zeros((N, H, W, 3), device=device, dtype=dtype)
+    X_lb = torch.tensor([-0.5,-0.5,-0.5])
+    X_ub = torch.tensor([ 0.5, 0.5, 0.5])
 
-    rgb_b_lb = torch.zeros((H, W, 3), device=device, dtype=dtype)
-    rgb_b_ub = torch.zeros((H, W, 3), device=device, dtype=dtype)
+    A, B = build_matrices(semi_A, semi_B)
 
-    for i in range(N - 1, -1, -1):
+    def f(x):
+        q = q_func(x, A, B)
+        return render(q, opacities, colors).sum()
 
-        c = colors[i].view(1, 1, 3)
+    x0 = 0.5 * (X_lb + X_ub)
 
-        # -------------------------
-        # residuals
-        # -------------------------
-        d_lb = c - rgb_ub
-        d_ub = c - rgb_lb
+    L, U, g, f0, M = taylor_bound(x0, X_lb, X_ub, f, samples=20)
 
-        w_l = w_lb[i][..., None]
-        w_u = w_ub[i][..., None]
+    # Monte Carlo ground truth check
+    err = []
 
-        k_l = w_k_lb[i][..., None]
-        k_u = w_k_ub[i][..., None]
+    for _ in range(200):
+        x = X_lb + torch.rand(3) * (X_ub - X_lb)
 
-        b_l = w_b_lb[i][..., None]
-        b_u = w_b_ub[i][..., None]
+        fx = f(x).item()
+        lx = L(x).item()
+        ux = U(x).item()
 
-        # =====================================================
-        # LOWER (single consistent mask)
-        # =====================================================
-        m_lb = (d_lb >= 0)
+        err.append(fx < lx or fx > ux)
 
-        w_sel_lb = torch.where(m_lb, w_l, w_u)
-        rgb_lb = rgb_lb + d_lb * w_sel_lb
+    print("violation rate:", sum(err)/len(err))
+    print("M:", M)
 
-        k_sel_lb = torch.where(m_lb, k_l, k_u)
-        b_sel_lb = torch.where(m_lb, b_l, b_u)
+def main():
+    torch.manual_seed(0)
 
-        rgb_k_lb[i] = d_lb * k_sel_lb
-        rgb_b_lb = rgb_b_lb + d_lb * b_sel_lb
+    # -----------------------------
+    # toy config
+    # -----------------------------
+    N, H, W = 10, 8, 8
 
-        # =====================================================
-        # UPPER (single consistent mask)
-        # =====================================================
-        m_ub = (d_ub >= 0)
+    semi_A = torch.randn(N, H, W, 3, 3)
+    semi_B = torch.randn(N, 3, 3).abs() + 0.5
+    opacities = torch.rand(N)
+    colors = torch.rand(N, 3)
+    cam_const = torch.zeros(N, 3)
 
-        w_sel_ub = torch.where(m_ub, w_u, w_l)
-        rgb_ub = rgb_ub + d_ub * w_sel_ub
+    X_lb = torch.tensor([-0.5, -0.3, -0.2])
+    X_ub = torch.tensor([ 0.6,  0.4,  0.5])
 
-        k_sel_ub = torch.where(m_ub, k_u, k_l)
-        b_sel_ub = torch.where(m_ub, b_u, b_l)
+    # -----------------------------
+    # build model
+    # -----------------------------
+    A, B = build_matrices(semi_A, semi_B)
 
-        rgb_k_ub[i] = d_ub * k_sel_ub
-        rgb_b_ub = rgb_b_ub + d_ub * b_sel_ub
+    def f(x):
+        q = q_func(x, A, B)
+        return render(q, opacities, colors).sum()
 
-    return rgb_lb, rgb_ub, rgb_k_lb, rgb_k_ub, rgb_b_lb, rgb_b_ub
+    x0 = 0.5 * (X_lb + X_ub)
 
+    # -----------------------------
+    # Taylor bound
+    # -----------------------------
+    L, U, g, f0, M = taylor_bound(x0, X_lb, X_ub, f, samples=10)
 
+    # -----------------------------
+    # Monte Carlo test
+    # -----------------------------
+    viol = 0
+    num_test = 200
 
-# -----------------------------
-# MC test
-# -----------------------------
+    for _ in range(num_test):
+        x = X_lb + torch.rand(3) * (X_ub - X_lb)
 
-@torch.no_grad()
-def test_compute_bound_exp(
-    N=2000,
-    H=32,
-    W=32,
-    num_samples=100,
-    device="cuda",
-    seed=0
-):
-    """
-    Monte Carlo soundness validation for compute_bound_exp().
-    """
+        fx = f(x).item()
+        lx = L(x).item()
+        ux = U(x).item()
 
-    torch.manual_seed(seed)
+        if fx < lx - 1e-6 or fx > ux + 1e-6:
+            viol += 1
 
-    print("=" * 80)
-    print("Generating random intervals...")
-
-    # x_lb >= 0
-    x_lb = torch.rand(
-        N, H, W,
-        device=device
-    ) * 20.0
-
-    # positive interval width
-    width = torch.rand(
-        N, H, W,
-        device=device
-    ) * 5.0
-
-    x_ub = x_lb + width
-
-    assert (x_lb >= 0).all()
-    assert (x_lb <= x_ub).all()
-
-    print(f"x_lb range: [{x_lb.min():.4f}, {x_lb.max():.4f}]")
-    print(f"x_ub range: [{x_ub.min():.4f}, {x_ub.max():.4f}]")
-
-
-    print("=" * 80)
-    print("Computing certified bounds...")
-
-    k_lb, k_ub, b_lb, b_ub = compute_bound_exp(x_lb, x_ub)
-
-    print("=" * 80)
-    print("Running Monte Carlo validation...")
-
-    worst_lb_violation = -float("inf")
-    worst_ub_violation = -float("inf")
-
-    max_lb_error = 0.0
-    max_ub_error = 0.0
-
-    for i in range(num_samples):
-
-        # sample x uniformly inside interval
-        alpha = torch.rand_like(x_lb)
-
-        x = x_lb + alpha * (x_ub - x_lb)
-
-        y_true = torch.exp(-0.5 * x)
-
-        y_lb = k_lb * x + b_lb
-        y_ub = k_ub * x + b_ub
-
-        # should be >= 0 if violated
-        lb_violation = (y_lb - y_true).max().item()
-        ub_violation = (y_true - y_ub).max().item()
-
-        worst_lb_violation = max(worst_lb_violation, lb_violation)
-        worst_ub_violation = max(worst_ub_violation, ub_violation)
-
-        max_lb_error = max(
-            max_lb_error,
-            (y_true - y_lb).max().item()
-        )
-
-        max_ub_error = max(
-            max_ub_error,
-            (y_ub - y_true).max().item()
-        )
-
-        if (i + 1) % 10 == 0:
-            print(
-                f"[{i+1:03d}/{num_samples}] "
-                f"worst_lb_violation={worst_lb_violation:.3e}, "
-                f"worst_ub_violation={worst_ub_violation:.3e}"
-            )
-
-    print("=" * 80)
-    print("FINAL RESULT")
-    print("=" * 80)
-
-    print(
-        f"Worst lower-bound violation: "
-        f"{worst_lb_violation:.6e}"
-    )
-
-    print(
-        f"Worst upper-bound violation: "
-        f"{worst_ub_violation:.6e}"
-    )
-
-    print(
-        f"Max lower gap (true - lb): "
-        f"{max_lb_error:.6e}"
-    )
-
-    print(
-        f"Max upper gap (ub - true): "
-        f"{max_ub_error:.6e}"
-    )
-
-    passed = (
-        worst_lb_violation <= 1e-6
-        and worst_ub_violation <= 1e-6
-    )
-
-    print("=" * 80)
-
-    if passed:
-        print("✅ SOUNDNESS TEST PASSED")
-    else:
-        print("❌ SOUNDNESS TEST FAILED")
-
-    print("=" * 80)
-
-    return passed
-
-
-# def test():
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     aMin = torch.tensor([0.7, 0.8, 0.6, 0.3]).to(device)
-#     aMax = torch.tensor([0.8, 1.0, 1.0, 0.7]).to(device)
-
-#     aMin = aMin.unsqueeze(-1).unsqueeze(-1)  # (N,) -> (N, 1, 1)
-#     aMax = aMax.unsqueeze(-1).unsqueeze(-1)  # (N,) -> (N, 1, 1)
-
-#     # N=4, ch=3
-#     c = torch.tensor([
-#         [0.6, 0.4, 0.5, 0.3],
-#         [0.2, 0.3, 0.7, 0.1],
-#         [0.9, 0.1, 0.4, 0.8],
-#     ]).to(device)
-
-#     CMax, CMin = compute_bound_alpha_blending(aMin, aMax, c)
-
-#     print("CMax:", CMax)
-#     print("CMin:", CMin)
-
-
+    print("==== Taylor Bound Test ====")
+    print("f(x0) =", f0.item())
+    print("M =", M)
+    print("violation rate =", viol / num_test)
 
 if __name__ == "__main__":
-    test_compute_bound_exp()
+    main()
+
+# @torch.no_grad()
+# def extract_coeff(
+#     w_lb, w_ub,
+#     colors
+# ):
+#     N, H, W = w_lb.shape
+#     device, dtype = w_lb.device, w_lb.dtype
+
+#     rgb_lb = torch.zeros((H, W, 3), device=device, dtype=dtype)
+#     rgb_ub = torch.zeros((H, W, 3), device=device, dtype=dtype)
+
+#     d_lb = torch.zeros((N, H, W, 3), device=device, dtype=dtype)
+#     d_ub = torch.zeros((N, H, W, 3), device=device, dtype=dtype)
+
+#     for i in range(N - 1, -1, -1):
+#         c = colors[i].view(1, 1, 3)
+
+#         d_lb[i] = c - rgb_lb
+#         d_ub[i] = c - rgb_ub
+
+#         w_l = w_lb[i][..., None] # (H, W, 1)
+#         w_u = w_ub[i][..., None] # (H, W, 1)
+
+#         m_lb = (d_lb[i] >= 0)
+#         w_sel_lb = torch.where(m_lb, w_l, w_u) # (H, W, 1)
+#         rgb_lb = rgb_lb + d_lb[i] * w_sel_lb 
+
+#         m_ub = (d_ub[i] >= 0)
+#         w_sel_ub = torch.where(m_ub, w_u, w_l)
+#         rgb_ub = rgb_ub + d_ub[i] * w_sel_ub
+
+#     return d_lb, d_ub
+
+
+# @torch.no_grad()
+# def sum_exp_quad_bound(X_lb, X_ub,
+#                         Z_ratio, opacities,
+#                         semi_A, semi_B, 
+#                         d_lb, d_ub, 
+#                         cam_const,
+#                         sample=32):
+        
+#     A = semi_A @ semi_A.transpose(-1, -2) # (N,H,W,3,3)
+#     B_ub = semi_B @ semi_B.transpose(-1, -2) # (N,3,3)
+#     B_lb = B_ub/(Z_ratio[:, None, None])**2 # (N, 3, 3)
+
+#     rgb_lb, rgb_ub = sample_func(X_lb, X_ub, 
+#                             opacities,
+#                             A, B_lb, B_ub,
+#                             d_lb, d_ub,
+#                             cam_const,
+#                             sample=sample)
+
+#     return rgb_lb, rgb_ub
+
+# @torch.no_grad()
+# def sample_func(
+#     X_lb, X_ub,
+#     opacities,
+#     A, B_lb, B_ub,
+#     d_lb, d_ub,
+#     cam_const,
+#     sample=32
+# ):
+#     N, H, W = A.shape[0:3]
+#     device, dtype = A.device, A.dtype
+
+#     # ✔ robust initialization
+#     rgb_lb = torch.full((H, W, 3), float('inf'), device=device, dtype=dtype)
+#     rgb_ub = torch.full((H, W, 3), float('-inf'), device=device, dtype=dtype)
+
+#     def sum_exp_quad(X, o, A, B, d):
+#         # print(f"x,A,B,shape:",X.shape, A.shape, B.shape)
+#         Num = X[:, None, None, None, :] @ A @ X[:, None, None, :, None]
+#         Num = Num.squeeze(-1).squeeze(-1)  # (N,H,W)
+
+#         Denom = X[:, None, :] @ B @ X[:, :, None]  # (N,1,1)
+
+#         ratio = -0.5 * (Num / Denom)
+#         w = o[:, None, None] * torch.exp(ratio)
+
+#         return (d * w[..., None]).sum(dim=0)  # (H,W,3)
+
+#     # -------------------------
+#     # helper: evaluate
+#     # -------------------------
+#     def eval_point(X):
+#         rgb_min = sum_exp_quad(X, opacities, A, B_lb, d_ub) # (H,W,3)
+#         rgb_max = sum_exp_quad(X, opacities, A, B_lb, d_lb) #sum_exp_quad(X, opacities, A, B_ub, d_ub)
+#         #print(rgb_min[0,0], rgb_max[0,0])
+
+#         return rgb_min, rgb_max
+
+#     # =========================================================
+#     # 1. corners (8)
+#     # =========================================================
+#     xl, yl, zl = X_lb[0:1], X_lb[1:2], X_lb[2:3]
+#     xu, yu, zu = X_ub[0:1], X_ub[1:2], X_ub[2:3]
+
+#     for x in (xl, xu):
+#         for y in (yl, yu):
+#             for z in (zl, zu):
+                
+#                 X = torch.cat((x, y, z), dim=-1) # (3, )
+#                 X = X.unsqueeze(0) + cam_const # (N,3)
+#                 rgb_min, rgb_max = eval_point(X)
+
+#                 # print(f"rgb_min:", rgb_min)
+#                 # print(f"fgb_max:", rgb_max)
+
+#                 # rgb_tmp_min = torch.minimum(rgb_min, rgb_max)
+#                 # rgb_tmp_max = torch.maximum(rgb_min, rgb_max)
+
+#                 # rgb_min = rgb_tmp_min
+#                 # rgb_max = rgb_tmp_max
+
+#                 #print(f"rgb_min[0,0], rgb_max[0,0]:",rgb_min[0,0], rgb_max[0,0])
+
+#                 def check_bound(rgb_min, rgb_max):
+#                     mask = rgb_min > rgb_max
+#                     if mask.any():
+#                         idx = mask.nonzero(as_tuple=False)
+#                         print("[BOUND VIOLATION]")
+#                         print("num:", idx.shape[0])
+#                         print("max diff:", (rgb_min - rgb_max).max().item())
+#                         print("sample idx:", idx[:5])
+#                         raise RuntimeError("invalid bound")
+                    
+#                 check_bound(rgb_min, rgb_max)
+                
+
+#                 rgb_lb = torch.minimum(rgb_lb, rgb_min)
+#                 rgb_ub = torch.maximum(rgb_ub, rgb_max)
+
+#     # =========================================================
+#     # 2. center point
+#     # =========================================================
+#     X_mid = 0.5 * (X_lb + X_ub)
+#     X_mid = X_mid.unsqueeze(0) + cam_const # (N, 3)
+#     rgb_min, rgb_max = eval_point(X_mid)
+
+#     rgb_lb = torch.minimum(rgb_lb, rgb_min)
+#     rgb_ub = torch.maximum(rgb_ub, rgb_max)
+
+#     # =========================================================
+#     # 3. random samples
+#     # =========================================================
+#     for _ in range(sample):
+#         eps = torch.rand_like(X_lb)
+#         X_rand = X_lb + eps * (X_ub - X_lb)
+#         X_rand = X_rand.unsqueeze(0) + cam_const
+
+#         rgb_min, rgb_max = eval_point(X_rand)
+
+#         rgb_lb = torch.minimum(rgb_lb, rgb_min)
+#         rgb_ub = torch.maximum(rgb_ub, rgb_max)
+
+#     # =========================================================
+#     # clamp to valid color range
+#     # =========================================================
+#     rgb_lb = rgb_lb.clamp(0.0, 1.0)
+#     rgb_ub = rgb_ub.clamp(0.0, 1.0)
+
+#     return rgb_lb, rgb_ub
+                
+

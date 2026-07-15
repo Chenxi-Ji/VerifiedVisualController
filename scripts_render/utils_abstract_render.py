@@ -3,7 +3,18 @@ from tqdm import tqdm
 import torch
 from itertools import product
 from utils_rational_quad import rational_quad_bound
-from utils_alpha_blending import compute_interval_bound_alpha_blending, compute_linear_bound_alpha_blending, compute_alpha_blending, compute_bound_exp  
+# from utils_alpha_blending import compute_alpha_blending, compute_interval_bound_alpha_blending, compute_linear_bound_alpha_blending
+
+@torch.no_grad()
+def camera_to_render_coords(x,y,z):
+    X = torch.stack([x, z, -y], dim=-1)  # (3, )
+    return X
+
+@torch.no_grad()
+def camera_bound_to_render_coords(x_lb,y_lb,z_lb, x_ub, y_ub, z_ub):
+    X_lb = torch.stack([x_lb, z_lb, -y_ub], dim=-1)  # (3, )
+    X_ub = torch.stack([x_ub, z_ub, -y_lb], dim=-1)  # (3, )
+    return X_lb, X_ub
 
 @torch.no_grad()
 def qvec2rotmat_batched(q):
@@ -159,7 +170,7 @@ def compute_bound_radius(pose_lb, pose_ub, Z_lb, Z_ub, fx, fy, cam_const, gs_con
         [pos_z_lb, pos_z_ub],
         yaw_list,
     ):
-        x = torch.stack([pos_x, pos_z, -pos_y], dim=-1)  # (3, )
+        x = camera_to_render_coords(pos_x,pos_y,pos_z)
         X = -x[None, :]*scale + cam_const   # (N, 3)
         Xx = compute_skew_matrix(X)  # (N, 3, 3)
 
@@ -238,7 +249,7 @@ def compute_mahal(pose, Z, dx, dy, cam_const, gs_const, adj_gs_const_T, scale):
 
     pos_x, pos_y, pos_z, yaw, pitch, roll = pose
 
-    x = torch.stack([pos_x, pos_z, -pos_y], dim=-1)  # (3, )
+    x = camera_to_render_coords(pos_x,pos_y,pos_z) #(3, )
     X = -x[None, :]*scale + cam_const   # (N, 3)
 
     ones = torch.ones((H,W), device=device, dtype=dtype)
@@ -353,11 +364,11 @@ def compute_mahal_chunked(
 
     H, W = dx.shape[-2], dx.shape[-1]
 
-    out = torch.empty((N, H, W), device=device, dtype=pose.dtype)
+    mahal = torch.empty((N, H, W), device=device, dtype=pose.dtype)
     for i in range(0, N, chunk_size):
         j = min(i + chunk_size, N)
 
-        out[i:j] = compute_mahal(
+        mahal[i:j] = compute_mahal(
             pose,
             Z[i:j],
             dx,
@@ -368,7 +379,7 @@ def compute_mahal_chunked(
             scale,
         )
 
-    return out
+    return mahal
     
 @torch.no_grad()
 def compute_bound_mahal_chunked(
@@ -411,7 +422,119 @@ def compute_bound_mahal_chunked(
     return mahal_lb, mahal_ub
 
 
-def compute_bound_rgb(pose_lb, pose_ub, Z_lb, Z_ub, k_lb, k_ub, b_lb, b_ub, dx, dy, cam_const, gs_const, adj_gs_const_T, scale):
+
+
+
+@torch.no_grad()
+def compute_alpha_blending(w, colors, rgb=None):
+    N, H, W = w.shape
+    device, dtype = w.device, w.dtype
+
+    if rgb is None:
+        rgb = torch.zeros((H, W, 3), device=device, dtype=dtype)
+
+    for i in range(N-1, -1, -1):
+        c = colors[i].view(1, 1, 3) # (1, 1, 3)
+        d = c - rgb # (H, W, 3)
+        rgb = rgb + d * w[i][..., None]
+
+    # print(f"rgb.shape={rgb.shape}, rgb.min={rgb.min():.6f}, rgb.max={rgb.max():.6f}, rgb.mean={rgb.mean():.6f}")
+    return rgb
+
+@torch.no_grad()
+def compute_interval_bound_alpha_blending(w_lb, w_ub, colors, rgb_lb = None, rgb_ub = None):
+    N, H, W = w_lb.shape
+    device, dtype = w_lb.device, w_lb.dtype
+
+    if rgb_lb is None:
+        rgb_lb = torch.zeros((H, W, 3), device=device, dtype=dtype)
+    if rgb_ub is None:
+        rgb_ub = torch.zeros((H, W, 3), device=device, dtype=dtype)
+
+    for i in range(N-1, -1, -1):
+        c = colors[i].view(1, 1, 3) # (1, 1, 3)
+
+        d_lb = c - rgb_lb # (H, W, 3)
+        d_ub = c - rgb_ub
+
+        w_l = w_lb[i][..., None] # (H, W, 1)
+        w_u = w_ub[i][..., None]
+
+        m_lb = (d_lb >= 0) # (H, W, 3) -> (H, W, 1) via broadcasting
+        w_sel_lb = torch.where(m_lb, w_l, w_u) # (H, W, 1)
+        rgb_lb = rgb_lb + d_lb * w_sel_lb # (H, W, 3)
+
+        m_ub = (d_ub >= 0)
+        w_sel_ub = torch.where(m_ub, w_u, w_l)
+        rgb_ub = rgb_ub + d_ub * w_sel_ub
+
+    return rgb_lb, rgb_ub
+
+@torch.no_grad()
+def compute_alpha_blending_chunked(
+    w,
+    colors,
+    rgb = None,
+    chunk_size=1024,
+):
+    N, H, W = w.shape
+    device, dtype = w.device, w.dtype
+
+    if rgb is None:
+        rgb = torch.zeros((H, W, 3), device=device, dtype=dtype)
+
+    for j in range(N, 0, -chunk_size):
+        i = max(j - chunk_size, 0)
+        rgb = compute_alpha_blending(
+            w[i:j, ...],
+            colors[i:j, :],
+            rgb
+        )
+
+    return rgb
+
+@torch.no_grad()
+def compute_interval_bound_alpha_blending_chunked(
+    w_lb, w_ub,
+    colors,
+    rgb_lb = None,
+    rgb_ub = None,
+    chunk_size=1024,
+):
+    N, H, W = w_lb.shape
+    device, dtype = w_lb.device, w_lb.dtype
+
+    if rgb_lb is None:
+        rgb_lb = torch.zeros((H, W, 3), device=device, dtype=dtype)
+    if rgb_ub is None:
+        rgb_ub = torch.zeros((H, W, 3), device=device, dtype=dtype)
+
+    for j in range(N, 0, -chunk_size):
+        i = max(j - chunk_size, 0)
+        rgb_lb, rgb_ub = compute_interval_bound_alpha_blending(
+            w_lb[i:j, ...],
+            w_ub[i:j, ...],
+            colors[i:j, :],
+            rgb_lb,
+            rgb_ub
+        )
+
+    return rgb_lb, rgb_ub
+
+
+
+
+
+from utils_alpha_blending import taylor_bound #extract_coeff, sum_exp_quad_bound
+
+@torch.no_grad()
+def compute_linear_bound_alpha_blending(
+    pose_lb, pose_ub,  Z_lb, Z_ub, 
+    dx, dy, cam_const, gs_const, adj_gs_const_T, scale,
+    w_lb, w_ub,
+    opacities, colors,
+    rgb_bg_lb = None, rgb_bg_ub = None
+):
     pos_x_lb, pos_y_lb, pos_z_lb, yaw_lb, pitch_lb, roll_lb = pose_lb
     pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
 
@@ -421,6 +544,22 @@ def compute_bound_rgb(pose_lb, pose_ub, Z_lb, Z_ub, k_lb, k_ub, b_lb, b_ub, dx, 
     H, W = dx.shape
 
     Z_ratio = Z_ub/Z_lb # (N, )
+    x_lb = torch.stack([pos_x_lb, pos_z_lb, -pos_y_ub], dim=-1)  # (3, )
+    x_ub = torch.stack([pos_x_ub, pos_z_ub, -pos_y_lb], dim=-1)  # (3, )
+
+    # if scale >0:
+    #     X_lb = -x_ub[None, :]*scale + cam_const   # (N, 3)
+    #     X_ub = -x_lb[None, :]*scale + cam_const   # (N, 3)
+    # else:
+    #     X_lb = -x_lb[None, :]*scale + cam_const   # (N, 3)
+    #     X_ub = -x_ub[None, :]*scale + cam_const   # (N, 3)
+
+    if scale >0:
+        X_lb = -x_ub*scale #(3, )
+        X_ub = -x_lb*scale #(3, )
+    else:
+        X_lb = x_lb*scale #(3, )
+        X_ub = x_ub*scale #(3, )
 
     ones = torch.ones((H,W), device=device, dtype=dtype)
     d = torch.stack([dx, dy, ones], dim=-1)  # (H,W,3)
@@ -428,18 +567,17 @@ def compute_bound_rgb(pose_lb, pose_ub, Z_lb, Z_ub, k_lb, k_ub, b_lb, b_ub, dx, 
 
     yaw_list = build_yaw_list(yaw_lb, yaw_ub)
 
-    rgb_lin_lb = torch.full((H, W, 3), float("inf"), device=device, dtype=dtype) # (H, W, 3)
-    rgb_lin_ub = torch.full((H, W, 3), float("-inf"), device=device, dtype=dtype) # (H, W, 3)
+    if rgb_bg_lb is None:
+        rgb_bg_lb = torch.zeros((H,W,3), device=device, dtype=dtype) # (H, W, 3)
+    if rgb_bg_ub is None:
+        rgb_bg_ub = torch.zeros((H,W,3), device=device, dtype=dtype) # (H, W, 3)
 
-    for pos_x,pos_y,pos_z, yaw in product(
-        [pos_x_lb, pos_x_ub],
-        [pos_y_lb, pos_y_ub],
-        [pos_z_lb, pos_z_ub],
-        yaw_list,
-    ):
-        x = torch.stack([pos_x, pos_z, -pos_y], dim=-1)  # (3, )
-        X = -x[None, :]*scale + cam_const   # (N, 3)
+    rgb_lb = torch.ones((H,W,3), device=device, dtype=torch.float64)
+    rgb_ub = torch.zeros((H,W,3), device=device, dtype=torch.float64)
 
+    # d_lb, d_ub = extract_coeff(w_lb, w_ub, colors)
+
+    for yaw in yaw_list:
         cos_yaw = torch.cos(yaw)
         sin_yaw = torch.sin(yaw)
 
@@ -453,37 +591,32 @@ def compute_bound_rgb(pose_lb, pose_ub, Z_lb, Z_ub, k_lb, k_ub, b_lb, b_ub, dx, 
         Rdx = compute_skew_matrix(Rd)  # (H, W, 3, 3)
 
         semi_P = Rdx[None, ...]@gs_const[:, None, None, ...]  # (N,H,W,3,3)
-        semi_P_lb = k_lb[..., None, None]*semi_P[..., None, :, : ] # (N,H,W,3,3,3)
-        # print("semi_P_lb shape:", semi_P_lb.shape)
-        semi_Num_lb = X[:, None, None, None, None, :] @ semi_P_lb  # (N,H,W,3,1,3)
-        Num_lb = semi_Num_lb@semi_Num_lb.transpose(-1, -2)  # (N,H,W,3,1,1)
-        Num_lb = Num_lb.squeeze(-1).squeeze(-1)  # (N,H,W,3)
+        adj_semi_Q_T = adj_gs_const_T/Z_lb[:, None, None] # (N, 3, 3)
 
-        semi_P_ub = k_ub[..., None, None]*semi_P[..., None, :, : ] # (N,H,W,3,3,3)
-        semi_Num_ub = X[:, None, None, None, None, :] @ semi_P_ub  # (N,H,W,3,1,3)
-        Num_ub = semi_Num_ub@semi_Num_ub.transpose(-1, -2)  # (N,H,W,3,1,1)
-        Num_ub = Num_ub.squeeze(-1).squeeze(-1)  # (N,H,W,3)
+        X_lb = X_lb.to(torch.float64)
+        X_ub = X_ub.to(torch.float64)
+        semi_P = semi_P.to(torch.float64)
+        adj_semi_Q_T = adj_semi_Q_T.to(torch.float64)
 
-        semi_Denom = X[:, None, :] @ adj_gs_const_T/Z_lb[:, None, None]  # (N, 1, 3)
-        Denom = semi_Denom@semi_Denom.transpose(-1, -2)  # (N, 1, 1)
-        Denom = Denom.squeeze(-1).squeeze(-1)  # (N, )
+        # rgb_min, rgb_max = sum_exp_quad_bound(X_lb, X_ub, Z_ratio, opacities,
+        #                                       semi_P, adj_semi_Q_T, 
+        #                                       d_lb, d_ub, 
+        #                                       cam_const,
+        #                                       sample=32)  # (H, W, 3)
 
-        mahal_lb = Num_lb/Denom[:, None, None, None]  # (N, H, W, 3)
-        mahal_ub = Num_ub/Denom[:, None, None, None]  # (N, H, W, 3)
+        rgb_min, rgb_max = taylor_bound(X_lb, X_ub, Z_ratio, 
+                                        opacities, colors,
+                                        semi_P, adj_semi_Q_T,
+                                        cam_const, 
+                                        sample=32) # (H,W,3)
+        rgb_lb = torch.minimum(rgb_lb, rgb_min)
+        rgb_ub = torch.maximum(rgb_ub, rgb_max)
 
-        mahal_lb = mahal_lb  # (N, H, W, 3)
-        mahal_ub = mahal_ub*Z_ratio[:, None, None, None]**2  # (N, H, W, 3)
-        mahal_lb = mahal_lb.sum(dim=0) # (H, W, 3)
-        mahal_ub = mahal_ub.sum(dim=0) # (H, W, 3)
+    rgb_lb = rgb_lb.to(dtype)
+    rgb_ub = rgb_ub.to(dtype)
 
-        rgb_lin_lb = torch.minimum(rgb_lin_lb, mahal_lb)  # (H, W, 3)
-        rgb_lin_ub = torch.maximum(rgb_lin_ub, mahal_ub)  # (H, W, 3)
-
-    rgb_lb = b_lb+rgb_lin_lb # (H, W, 3)
-    rgb_ub = b_ub+rgb_lin_ub # (H, W, 3)
-
-    print("rgb_lb.min():", rgb_lb.min().item(), "rgb_lb.max():", rgb_lb.max().item())
-    print("rgb_ub.min():", rgb_ub.min().item(), "rgb_ub.max():", rgb_ub.max().item())
+    rgb_lb += rgb_bg_lb
+    rgb_ub += rgb_bg_ub
 
     return rgb_lb, rgb_ub
 
@@ -718,40 +851,17 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
         w_ub = torch.where(w_ub > 1-1e-3, torch.ones_like(w_ub), w_ub)
         w_ub = torch.where((w_ub - w_lb) < 1e-3, w_lb, w_ub)
 
-        # print(f"Tile ({tx}, {ty}), x=[{x0}, {x1}), y=[{y0}, {y1}): {idx.numel()} Gaussians")
-        # print(f"w_lb[sample_idx, 0, 0]: {w_lb[sample_idx, 0, 0].item()}, w[sample_idx, 0, 0]: {w[sample_idx, 0, 0].item()}, w_ub[sample_idx, 0, 0]: {w_ub[sample_idx, 0, 0].item()}\n")
 
-        coeff = 0.25
-        w_lb = (1-coeff)*w + coeff*w_lb
-        w_ub = (1-coeff)*w + coeff*w_ub
-       
-
-
-        if linear:
-            w_k_lb, w_k_ub, w_b_lb, w_b_ub = compute_bound_exp(w_lb, w_ub)  # (num_valid, tile_h, tile_w)
-
-
-
-        rgb_patch = compute_alpha_blending(w, flt_colors)  # (num_valid, tile_h, tile_w, 3), (num_valid, tile_h, tile_w)
+        rgb_patch = compute_alpha_blending_chunked(w, flt_colors)  # (num_valid, tile_h, tile_w, 3), (num_valid, tile_h, tile_w)
         # rgb_patch_lb = rgb_patch_ub = rgb_patch
 
-        if not linear:
-            rgb_patch_lb, rgb_patch_ub = compute_interval_bound_alpha_blending(w_lb, w_ub, flt_colors)  # (tile_h, tile_w, 3)
-        else:
-            rgb_patch_int_lb, rgb_patch_int_ub, rgb_patch_k_lb, rgb_patch_k_ub, rgb_patch_b_lb, rgb_patch_b_ub = \
-            compute_linear_bound_alpha_blending(w_lb, w_ub, w_k_lb, w_k_ub, w_b_lb, w_b_ub, flt_colors)  
-            # (tile_h, tile_w, 3), (num_valid, tile_h, tile_w), (tile_h, tile_w, 3)
-
-            print(f"rgb_patch_int_lb[sample_idx, 0, 0]: {rgb_patch_int_lb[sample_idx, 0, 0].item()}, rgb_patch[sample_idx, 0, 0]: {rgb_patch[sample_idx, 0, 0].item()}, rgb_patch_int_ub[sample_idx, 0, 0]: {rgb_patch_int_ub[sample_idx, 0, 0].item()}\n")
-            print(f"rgb_patch_k_lb[sample_idx, 0, 0, 0]: {rgb_patch_k_lb[sample_idx, 0, 0, 0].item()}, rgb_patch_k_ub[sample_idx, 0, 0, 0]: {rgb_patch_k_ub[sample_idx, 0, 0, 0].item()}\n")
-            print(f"rgb_patch_b_lb[sample_idx, 0, 0]: {rgb_patch_b_lb[sample_idx, 0, 0].item()}, rgb_patch_b_ub[sample_idx, 0, 0]: {rgb_patch_b_ub[sample_idx, 0, 0].item()}\n")
-            print(f"rgb_patch_k_lb.min(): {rgb_patch_k_lb.min().item()}, rgb_patch_k_ub.max(): {rgb_patch_k_ub.max().item()}\n")
-            print(f"rgb_patch_b_lb.min(): {rgb_patch_b_lb.min().item()}, rgb_patch_b_ub.max(): {rgb_patch_b_ub.max().item()}\n")
-
-            rgb_patch_lb, rgb_patch_ub = compute_bound_rgb(pose_lb, pose_ub, flt_Z_lb, flt_Z_ub, 
-                                                           rgb_patch_k_lb, rgb_patch_k_ub, rgb_patch_b_lb, rgb_patch_b_ub, 
-                                                           dx, dy, flt_cam_const, flt_gs_const, flt_adj_gs_const_T, scale)
-            
+        rgb_patch_lb, rgb_patch_ub = compute_interval_bound_alpha_blending_chunked(w_lb, w_ub, flt_colors)  # (tile_h, tile_w, 3)
+        # rgb_patch_lb, rgb_patch_ub = compute_linear_bound_alpha_blending(pose_lb, pose_ub,  flt_Z_lb, flt_Z_ub, 
+        #                                                                 dx, dy, flt_cam_const, flt_gs_const, flt_adj_gs_const_T, scale,
+        #                                                                 w_lb, w_ub,
+        #                                                                 flt_opacities, flt_colors,
+        #                                                                 )  # (tile_h, tile_w, 3)
+    
         rgb[y0:y1, x0:x1] = rgb_patch
         rgb_lb[y0:y1, x0:x1] = rgb_patch_lb
         rgb_ub[y0:y1, x0:x1] = rgb_patch_ub 
