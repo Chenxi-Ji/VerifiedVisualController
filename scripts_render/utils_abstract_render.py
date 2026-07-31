@@ -3,18 +3,13 @@ from tqdm import tqdm
 import torch
 from itertools import product
 from utils_rational_quad import rational_quad_bound
-# from utils_alpha_blending import compute_alpha_blending, compute_interval_bound_alpha_blending, compute_linear_bound_alpha_blending
-
-@torch.no_grad()
-def camera_to_render_coords(x,y,z):
-    X = torch.stack([x, z, -y], dim=-1)  # (3, )
-    return X
-
-@torch.no_grad()
-def camera_bound_to_render_coords(x_lb,y_lb,z_lb, x_ub, y_ub, z_ub):
-    X_lb = torch.stack([x_lb, z_lb, -y_ub], dim=-1)  # (3, )
-    X_ub = torch.stack([x_ub, z_ub, -y_lb], dim=-1)  # (3, )
-    return X_lb, X_ub
+from coordinate_transform import (
+    pose_bound_to_camera_bounds,
+    pose_to_camera_xyz,
+    pose_to_render_coords,
+    pose_to_render_rotation,
+    transform_to_render_constants,
+)
 
 @torch.no_grad()
 def qvec2rotmat_batched(q):
@@ -37,15 +32,27 @@ def qvec2rotmat_batched(q):
         return rotmat
 
 @torch.no_grad()
-def build_yaw_list(yaw_lb, yaw_ub, k=6):
-    if yaw_ub - yaw_lb < 1e-3:
-        return torch.tensor([yaw_lb], device=yaw_lb.device, dtype=yaw_lb.dtype) 
+def build_angle_list(angle_lb, angle_ub, k=6):
+    if angle_ub - angle_lb < 1e-3:
+        return torch.tensor([angle_lb], device=angle_lb.device, dtype=angle_lb.dtype) 
     else:
-        yaw_list = torch.linspace(yaw_lb, yaw_ub, steps=k, device=yaw_lb.device, dtype=yaw_lb.dtype)
-        return yaw_list
+        angle_list = torch.linspace(angle_lb, angle_ub, steps=k, device=angle_lb.device, dtype=angle_lb.dtype)
+        return angle_list
 
 @torch.no_grad()
-def compute_bound_Z(pose_lb, pose_ub, const, scale):
+def build_yaw_list(yaw_lb, yaw_ub, k=6):
+    return build_angle_list(yaw_lb, yaw_ub, k)
+
+@torch.no_grad()
+def build_pitch_list(pitch_lb, pitch_ub, k=6):
+    return build_angle_list(pitch_lb, pitch_ub, k)
+
+@torch.no_grad()
+def build_roll_list(roll_lb, roll_ub, k=6):
+    return build_angle_list(roll_lb, roll_ub, k)
+
+@torch.no_grad()
+def compute_bound_Z(pose_lb, pose_ub, const, scale, world_frame=False):
     device = pose_lb.device
     dtype = pose_lb.dtype
     N = const.shape[0]
@@ -54,20 +61,23 @@ def compute_bound_Z(pose_lb, pose_ub, const, scale):
     pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
 
     yaw_list = build_yaw_list(yaw_lb, yaw_ub)
+    pitch_list = build_pitch_list(pitch_lb, pitch_ub)
+    roll_list = build_roll_list(roll_lb, roll_ub)
 
     Z_min = torch.full((N,), float("inf"), device=device, dtype=dtype) # (N, )
     Z_max = torch.full((N,), float("-inf"), device=device, dtype=dtype) # (N, )
 
-    for pos_x, pos_y, yaw in product(
+    for pos_x, pos_y, pos_z, yaw, pitch, roll in product(
         [pos_x_lb, pos_x_ub],
         [pos_y_lb, pos_y_ub],
+        [pos_z_lb, pos_z_ub],
         yaw_list,
+        pitch_list,
+        roll_list,
     ):
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-
         # Compute Z for this combination
-        Z = cos_yaw*(const[:, 0] - pos_x*scale) - sin_yaw*(const[:, 2] + pos_y*scale)  # (N, )
+        pose = torch.stack([pos_x, pos_y, pos_z, yaw, pitch, roll])
+        _, _, Z = pose_to_camera_xyz(pose, const, scale, world_frame)  # (N, )
         # update bounds
         Z_min = torch.minimum(Z_min, Z)
         Z_max = torch.maximum(Z_max, Z)
@@ -76,7 +86,7 @@ def compute_bound_Z(pose_lb, pose_ub, const, scale):
     return Z_min, Z_max
 
 @torch.no_grad()
-def compute_bound_XZ(pose_lb, pose_ub, const, scale):
+def compute_bound_XZ(pose_lb, pose_ub, const, scale, world_frame=False):
     device = pose_lb.device
     dtype = pose_lb.dtype
     N = const.shape[0]
@@ -85,21 +95,23 @@ def compute_bound_XZ(pose_lb, pose_ub, const, scale):
     pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
 
     yaw_list = build_yaw_list(yaw_lb, yaw_ub)
+    pitch_list = build_pitch_list(pitch_lb, pitch_ub)
+    roll_list = build_roll_list(roll_lb, roll_ub)
 
     XZ_min = torch.full((N,), float("inf"), device=device, dtype=dtype) # (N, )
     XZ_max = torch.full((N,), float("-inf"), device=device, dtype=dtype) # (N, )
 
-    for pos_x, pos_y, yaw in product(
+    for pos_x, pos_y, pos_z, yaw, pitch, roll in product(
         [pos_x_lb, pos_x_ub],
         [pos_y_lb, pos_y_ub],
-        yaw_list
+        [pos_z_lb, pos_z_ub],
+        yaw_list,
+        pitch_list,
+        roll_list,
     ):
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-
         # Compute Z for this combination
-        Z = cos_yaw*(const[:, 0] - pos_x*scale) - sin_yaw*(const[:, 2] + pos_y*scale)  # (N, )
-        X = sin_yaw*(const[:, 0] - pos_x*scale) + cos_yaw*(const[:, 2] + pos_y*scale)  # (N, )
+        pose = torch.stack([pos_x, pos_y, pos_z, yaw, pitch, roll])
+        X, _, Z = pose_to_camera_xyz(pose, const, scale, world_frame)  # (N, )
         XZ = X/Z  # (N, )
 
         # update bounds
@@ -110,7 +122,7 @@ def compute_bound_XZ(pose_lb, pose_ub, const, scale):
     return XZ_min, XZ_max
 
 @torch.no_grad()
-def compute_bound_YZ(pose_lb, pose_ub, const, scale):
+def compute_bound_YZ(pose_lb, pose_ub, const, scale, world_frame=False):
     device = pose_lb.device
     dtype = pose_lb.dtype
     N = const.shape[0]
@@ -119,22 +131,23 @@ def compute_bound_YZ(pose_lb, pose_ub, const, scale):
     pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
 
     yaw_list = build_yaw_list(yaw_lb, yaw_ub)
+    pitch_list = build_pitch_list(pitch_lb, pitch_ub)
+    roll_list = build_roll_list(roll_lb, roll_ub)
 
     YZ_min = torch.full((N,), float("inf"), device=device, dtype=dtype) # (N, )
     YZ_max = torch.full((N,), float("-inf"), device=device, dtype=dtype) # (N, )
 
-    for pos_x, pos_y, pos_z, yaw in product(
+    for pos_x, pos_y, pos_z, yaw, pitch, roll in product(
         [pos_x_lb, pos_x_ub],
         [pos_y_lb, pos_y_ub],
         [pos_z_lb, pos_z_ub],
         yaw_list,
+        pitch_list,
+        roll_list,
     ):
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-
         # Compute Z for this combination
-        Z = cos_yaw*(const[:, 0] - pos_x*scale) - sin_yaw*(const[:, 2] + pos_y*scale)  # (N, )
-        Y = -(const[:, 1] - pos_z*scale)  # (N, )
+        pose = torch.stack([pos_x, pos_y, pos_z, yaw, pitch, roll])
+        _, Y, Z = pose_to_camera_xyz(pose, const, scale, world_frame)  # (N, )
         YZ =  Y/Z  # (N, )
 
         # update bounds
@@ -145,7 +158,34 @@ def compute_bound_YZ(pose_lb, pose_ub, const, scale):
     return YZ_min, YZ_max
 
 @torch.no_grad()
-def compute_bound_radius(pose_lb, pose_ub, Z_lb, Z_ub, fx, fy, cam_const, gs_const, scale):
+def compute_radius(pose, Z, fx, fy, cam_const, gs_const, scale, world_frame=False):
+    device = Z.device
+    dtype = Z.dtype
+
+    F = torch.tensor([[fx, 0.0, 0.0], [0.0, fy, 0.0]], device=device, dtype=dtype)  # (2, 3)
+    E = torch.tensor([
+        [0.0, 1.0, 0.0],
+        [-1.0,0.0, 0.0],
+        [0.0, 0.0, 0.0]
+    ]).to(device=device, dtype=dtype)  # (3, 3)
+    FE = F@E  # (2, 3)
+
+    x = pose_to_render_coords(pose, world_frame)
+    X = -x[None, :]*scale + cam_const   # (N, 3)
+    Xx = compute_skew_matrix(X)  # (N, 3, 3)
+
+    Rw = pose_to_render_rotation(pose, world_frame) # (3, 3)
+
+    RXx = Rw[None, ...]@Xx  # (N, 3, 3)
+
+    semi_cov2d = FE[None, ...]@RXx@gs_const  # (N, 2, 3)
+    max_cov2d_eig = torch.linalg.matrix_norm(semi_cov2d, ord=2) #(N,)
+    radius = max_cov2d_eig/Z**2  # (N, )
+
+    return radius
+
+@torch.no_grad()
+def compute_bound_radius(pose_lb, pose_ub, Z_lb, Z_ub, fx, fy, cam_const, gs_const, scale, world_frame=False):
     pos_x_lb, pos_y_lb, pos_z_lb, yaw_lb, pitch_lb, roll_lb = pose_lb
     pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
 
@@ -162,31 +202,35 @@ def compute_bound_radius(pose_lb, pose_ub, Z_lb, Z_ub, fx, fy, cam_const, gs_con
     FE = F@E  # (2, 3)
 
     yaw_list = build_yaw_list(yaw_lb, yaw_ub)
+    pitch_list = build_pitch_list(pitch_lb, pitch_ub)
+    roll_list = build_roll_list(roll_lb, roll_ub)
     max_radius = torch.zeros(N, device=device, dtype=dtype)
 
-    for pos_x, pos_y, pos_z, yaw in product(
+    for pos_x, pos_y, pos_z, yaw, pitch, roll in product(
         [pos_x_lb, pos_x_ub],
         [pos_y_lb, pos_y_ub],
         [pos_z_lb, pos_z_ub],
         yaw_list,
+        pitch_list,
+        roll_list,
     ):
-        x = camera_to_render_coords(pos_x,pos_y,pos_z)
+        pose = torch.stack([pos_x, pos_y, pos_z, yaw, pitch, roll])
+        x = pose_to_render_coords(pose, world_frame)
         X = -x[None, :]*scale + cam_const   # (N, 3)
         Xx = compute_skew_matrix(X)  # (N, 3, 3)
 
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-
-        Rw = torch.stack([torch.stack([sin_yaw, torch.tensor(0.0, device=device), cos_yaw]),
-                        torch.tensor([0.0, -1.0, 0.0], device=device),
-                        torch.stack([cos_yaw, torch.tensor(0.0, device=device), -sin_yaw])
-        ]) # (3, 3)
+        Rw = pose_to_render_rotation(pose, world_frame) # (3, 3)
 
         RXx = Rw[None, ...]@Xx  # (N, 3, 3)
 
         semi_cov2d = FE[None, ...]@RXx@gs_const  # (N, 2, 3)
         max_cov2d_eig = torch.linalg.matrix_norm(semi_cov2d, ord=2) #(N,)
-        radius = max_cov2d_eig/Z_lb**2  # (N, )
+        # Sampling-based radius is tighter but can miss Gaussians near tile boundaries.
+        # _, _, Z_sample = pose_to_camera_xyz(pose, cam_const, scale, world_frame)  # (N, )
+        # radius = max_cov2d_eig/Z_sample.clamp_min(1e-6)**2  # (N, )
+
+        # Safe but looser radius upper bound:
+        radius = max_cov2d_eig/Z_lb.clamp_min(1e-6)**2  # (N, )
 
         max_radius = torch.maximum(max_radius, radius)
 
@@ -241,7 +285,7 @@ def compute_adj(M):
     return adj_M
 
 @torch.no_grad()
-def compute_mahal(pose, Z, dx, dy, cam_const, gs_const, adj_gs_const_T, scale):
+def compute_mahal(pose, Z, dx, dy, cam_const, gs_const, adj_gs_const_T, scale, world_frame=False):
     device = Z.device
     dtype = Z.dtype
     N = Z.shape[0]
@@ -249,20 +293,14 @@ def compute_mahal(pose, Z, dx, dy, cam_const, gs_const, adj_gs_const_T, scale):
 
     pos_x, pos_y, pos_z, yaw, pitch, roll = pose
 
-    x = camera_to_render_coords(pos_x,pos_y,pos_z) #(3, )
+    x = pose_to_render_coords(pose, world_frame) #(3, )
     X = -x[None, :]*scale + cam_const   # (N, 3)
 
     ones = torch.ones((H,W), device=device, dtype=dtype)
     d = torch.stack([dx, dy, ones], dim=-1)  # (H,W,3)
     #D = compute_skew_matrix(d)  # (H,W,3,3)
 
-    sin_yaw = torch.sin(yaw)  # (N,)
-    cos_yaw = torch.cos(yaw)  # (N,)
-
-    Rw = torch.stack([torch.stack([sin_yaw, torch.tensor(0.0, device=device), cos_yaw]),
-        torch.tensor([0.0, -1.0, 0.0], device=device),
-        torch.stack([cos_yaw, torch.tensor(0.0, device=device), -sin_yaw])
-    ]) # (3, 3)
+    Rw = pose_to_render_rotation(pose, world_frame) # (3, 3)
 
     #RDR = Rw.T[None, None, ...]@D@Rw[None, None, ...]  # (H, W, 3,3)
     Rd = Rw.T[None, None, ...]@d[..., None]  # (H, W, 3, 1)
@@ -285,7 +323,7 @@ def compute_mahal(pose, Z, dx, dy, cam_const, gs_const, adj_gs_const_T, scale):
     return mahal
 
 @torch.no_grad()
-def compute_bound_mahal(pose_lb, pose_ub, Z_lb, Z_ub, dx, dy, cam_const, gs_const, adj_gs_const_T, scale):
+def compute_bound_mahal(pose_lb, pose_ub, Z_lb, Z_ub, dx, dy, cam_const, gs_const, adj_gs_const_T, scale, world_frame=False):
     pos_x_lb, pos_y_lb, pos_z_lb, yaw_lb, pitch_lb, roll_lb = pose_lb
     pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
 
@@ -295,33 +333,22 @@ def compute_bound_mahal(pose_lb, pose_ub, Z_lb, Z_ub, dx, dy, cam_const, gs_cons
     H, W = dx.shape
 
     Z_ratio = Z_ub/Z_lb # (N, )
-    x_lb = torch.stack([pos_x_lb, pos_z_lb, -pos_y_ub], dim=-1)  # (3, )
-    x_ub = torch.stack([pos_x_ub, pos_z_ub, -pos_y_lb], dim=-1)  # (3, )
-
-    if scale >0:
-        X_lb = -x_ub[None, :]*scale + cam_const   # (N, 3)
-        X_ub = -x_lb[None, :]*scale + cam_const   # (N, 3)
-    else:
-        X_lb = -x_lb[None, :]*scale + cam_const   # (N, 3)
-        X_ub = -x_ub[None, :]*scale + cam_const   # (N, 3)
+    X_lb, X_ub = pose_bound_to_camera_bounds(pose_lb, pose_ub, cam_const, scale, world_frame)
 
     ones = torch.ones((H,W), device=device, dtype=dtype)
     d = torch.stack([dx, dy, ones], dim=-1)  # (H,W,3)
     # D = compute_skew_matrix(d)  # (H,W,3,3)
 
     yaw_list = build_yaw_list(yaw_lb, yaw_ub)
+    pitch_list = build_pitch_list(pitch_lb, pitch_ub)
+    roll_list = build_roll_list(roll_lb, roll_ub)
 
     mahal_lb = torch.full((N,H,W), float("inf"), device=device, dtype=torch.float64) # (N, H, W)
     mahal_ub = torch.full((N,H,W), float("-inf"), device=device, dtype=torch.float64) # (N, H, W)
 
-    for yaw in yaw_list:
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-
-        Rw = torch.stack([torch.stack([sin_yaw, torch.tensor(0.0, device=device), cos_yaw]),
-            torch.tensor([0.0, -1.0, 0.0], device=device),
-            torch.stack([cos_yaw, torch.tensor(0.0, device=device), -sin_yaw])
-        ]) # (3, 3)
+    for yaw, pitch, roll in product(yaw_list, pitch_list, roll_list):
+        pose_angle = torch.stack([pos_x_lb, pos_y_lb, pos_z_lb, yaw, pitch, roll])
+        Rw = pose_to_render_rotation(pose_angle, world_frame) # (3, 3)
 
         Rd = Rw.T[None, None, ...]@d[..., None]  # (H, W, 3, 1)
         Rd = Rd.squeeze(-1)  # (H, W, 3)
@@ -358,6 +385,7 @@ def compute_mahal_chunked(
     adj_gs_const_T,
     scale,
     chunk_size=1024,
+    world_frame=False,
 ):
     N = Z.shape[0]
     device = pose.device
@@ -377,6 +405,7 @@ def compute_mahal_chunked(
             gs_const[i:j],
             adj_gs_const_T[i:j],
             scale,
+            world_frame,
         )
 
     return mahal
@@ -394,6 +423,7 @@ def compute_bound_mahal_chunked(
     adj_gs_const_T,
     scale,
     chunk_size=1024,
+    world_frame=False,
 ):
 
     N = Z_lb.shape[0]
@@ -417,6 +447,7 @@ def compute_bound_mahal_chunked(
             gs_const[i:j],
             adj_gs_const_T[i:j],
             scale,
+            world_frame,
         )
 
     return mahal_lb, mahal_ub
@@ -521,132 +552,34 @@ def compute_interval_bound_alpha_blending_chunked(
 
     return rgb_lb, rgb_ub
 
-
-
-
-
-from utils_alpha_blending import taylor_bound #extract_coeff, sum_exp_quad_bound
-
-@torch.no_grad()
-def compute_linear_bound_alpha_blending(
-    pose_lb, pose_ub,  Z_lb, Z_ub, 
-    dx, dy, cam_const, gs_const, adj_gs_const_T, scale,
-    w_lb, w_ub,
-    opacities, colors,
-    rgb_bg_lb = None, rgb_bg_ub = None
-):
-    pos_x_lb, pos_y_lb, pos_z_lb, yaw_lb, pitch_lb, roll_lb = pose_lb
-    pos_x_ub, pos_y_ub, pos_z_ub, yaw_ub, pitch_ub, roll_ub = pose_ub
-
-    device = Z_lb.device
-    dtype = Z_lb.dtype
-    N = Z_lb.shape[0]
-    H, W = dx.shape
-
-    Z_ratio = Z_ub/Z_lb # (N, )
-    x_lb = torch.stack([pos_x_lb, pos_z_lb, -pos_y_ub], dim=-1)  # (3, )
-    x_ub = torch.stack([pos_x_ub, pos_z_ub, -pos_y_lb], dim=-1)  # (3, )
-
-    # if scale >0:
-    #     X_lb = -x_ub[None, :]*scale + cam_const   # (N, 3)
-    #     X_ub = -x_lb[None, :]*scale + cam_const   # (N, 3)
-    # else:
-    #     X_lb = -x_lb[None, :]*scale + cam_const   # (N, 3)
-    #     X_ub = -x_ub[None, :]*scale + cam_const   # (N, 3)
-
-    if scale >0:
-        X_lb = -x_ub*scale #(3, )
-        X_ub = -x_lb*scale #(3, )
-    else:
-        X_lb = x_lb*scale #(3, )
-        X_ub = x_ub*scale #(3, )
-
-    ones = torch.ones((H,W), device=device, dtype=dtype)
-    d = torch.stack([dx, dy, ones], dim=-1)  # (H,W,3)
-    # D = compute_skew_matrix(d)  # (H,W,3,3)
-
-    yaw_list = build_yaw_list(yaw_lb, yaw_ub)
-
-    if rgb_bg_lb is None:
-        rgb_bg_lb = torch.zeros((H,W,3), device=device, dtype=dtype) # (H, W, 3)
-    if rgb_bg_ub is None:
-        rgb_bg_ub = torch.zeros((H,W,3), device=device, dtype=dtype) # (H, W, 3)
-
-    rgb_lb = torch.ones((H,W,3), device=device, dtype=torch.float64)
-    rgb_ub = torch.zeros((H,W,3), device=device, dtype=torch.float64)
-
-    # d_lb, d_ub = extract_coeff(w_lb, w_ub, colors)
-
-    for yaw in yaw_list:
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-
-        Rw = torch.stack([torch.stack([sin_yaw, torch.tensor(0.0, device=device), cos_yaw]),
-            torch.tensor([0.0, -1.0, 0.0], device=device),
-            torch.stack([cos_yaw, torch.tensor(0.0, device=device), -sin_yaw])
-        ]) # (3, 3)
-
-        Rd = Rw.T[None, None, ...]@d[..., None]  # (H, W, 3, 1)
-        Rd = Rd.squeeze(-1)  # (H, W, 3)
-        Rdx = compute_skew_matrix(Rd)  # (H, W, 3, 3)
-
-        semi_P = Rdx[None, ...]@gs_const[:, None, None, ...]  # (N,H,W,3,3)
-        adj_semi_Q_T = adj_gs_const_T/Z_lb[:, None, None] # (N, 3, 3)
-
-        X_lb = X_lb.to(torch.float64)
-        X_ub = X_ub.to(torch.float64)
-        semi_P = semi_P.to(torch.float64)
-        adj_semi_Q_T = adj_semi_Q_T.to(torch.float64)
-
-        # rgb_min, rgb_max = sum_exp_quad_bound(X_lb, X_ub, Z_ratio, opacities,
-        #                                       semi_P, adj_semi_Q_T, 
-        #                                       d_lb, d_ub, 
-        #                                       cam_const,
-        #                                       sample=32)  # (H, W, 3)
-
-        rgb_min, rgb_max = taylor_bound(X_lb, X_ub, Z_ratio, 
-                                        opacities, colors,
-                                        semi_P, adj_semi_Q_T,
-                                        cam_const, 
-                                        sample=32) # (H,W,3)
-        rgb_lb = torch.minimum(rgb_lb, rgb_min)
-        rgb_ub = torch.maximum(rgb_ub, rgb_max)
-
-    rgb_lb = rgb_lb.to(dtype)
-    rgb_ub = rgb_ub.to(dtype)
-
-    rgb_lb += rgb_bg_lb
-    rgb_ub += rgb_bg_ub
-
-    return rgb_lb, rgb_ub
-
-
-def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
-            fx = 113.258171, fy = 113.347599, 
-            cx = 158.868074, cy = 98.837772, 
+def render_bound(pose_lb, pose_ub, scene,
+            camera_params = (300, 200, 113.258171, 113.347599, 158.868074, 98.837772),
             near_plane=0.01, far_plane=1e10,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             dtype=torch.float32,
             chunk_size=1024*2,
-            linear = False
+            tile=32,
+            debug = False
             ):
     
-    means, quats, opacities, scales, colors, transform, scale = scene
+    width, height, fx, fy, cx, cy = camera_params
+    if len(scene) == 8:
+        means, quats, opacities, scales, colors, transform, scale, world_frame = scene
+    else:
+        means, quats, opacities, scales, colors, transform, scale = scene
+        world_frame = False
 
     N = means.shape[0]
 
-    TILE = 32
     ALPHA_THRESHOLD = 1e-3
     MIN_RADIUS = 0.1
-    MAX_RADIUS =50.0
+    MAX_RADIUS = max(width, height)/2
     COEFF_RADIUS = 3.0
     sample_idx = 30
 
     scales=torch.exp(scales)
     opacities=torch.sigmoid(opacities).squeeze(-1)
-    transform = torch.as_tensor(transform, dtype=dtype, device=device)
-    trans_R = transform[:3, :3]
-    trans_T = transform[:3, 3:4]
+    transform, trans_R, trans_T, cam_const = transform_to_render_constants(means, transform, scale, device, dtype)
 
     pose_lb = torch.as_tensor(pose_lb, dtype=dtype, device=device)
     pose_ub = torch.as_tensor(pose_ub, dtype=dtype, device=device)
@@ -657,15 +590,8 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     # ============================================================
     # 0. Compute View Matrix
     # ============================================================
-    sin_yaw = torch.sin(yaw)
-    cos_yaw = torch.cos(yaw)
-
-    Rw = torch.stack([
-        torch.stack([sin_yaw, torch.tensor(0.0, device=device), cos_yaw]),
-        torch.tensor([0.0, -1.0, 0.0], device=device),
-        torch.stack([cos_yaw, torch.tensor(0.0, device=device), -sin_yaw])
-    ])
-    Tw = torch.stack([pos_x, pos_z, -pos_y]).unsqueeze(-1)
+    Rw = pose_to_render_rotation(pose, world_frame)
+    Tw = pose_to_render_coords(pose, world_frame).unsqueeze(-1)
 
     # view_R = Rw@trans_R.T
     # view_T = -view_R@(trans_R@Tw + trans_T)*scale
@@ -676,17 +602,43 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     # ============================================================
     # 1. Transform to Camera Space (Vectorized)
     # ============================================================
-    cam_const = trans_R.T[None, ...]@(means[..., None]-trans_T[None, ...]*scale)  # (N, 3, 1)
     means_cam = Rw[None, ...]@(cam_const-Tw[None, ...]*scale)  # (N, 3, 1)
 
     cam_const = cam_const.squeeze(-1)  # (N, 3)
     means_cam = means_cam.squeeze(-1)  # (N, 3)
 
-    Z_lb, Z_ub = compute_bound_Z(pose_lb, pose_ub, cam_const, scale)
-    assert (Z_lb <= Z_ub).all(), "Z_lb should be less than or equal to Z_ub for all Gaussians"
+    # ============================================================
+    # 3. Camera Projection (Vectorized)
+    # ============================================================
+    X = means_cam[:, 0]  # (N,)
+    Y = means_cam[:, 1]  # (N,)
+    Z = means_cam[:, 2]  # (N,)
+    XZ = X/Z  # (N,)
+    YZ = Y/Z  # (N,)
+    px = fx * XZ + cx  # (N,)
+    py = fy * YZ + cy  # (N,)
 
-    # Filter valid Gaussians based on Z_lb
-    valid_depth = Z_lb > near_plane
+    if debug:
+        Z_lb = Z_ub = Z
+        px_lb = px_ub = px
+        py_lb = py_ub = py
+
+        # Filter valid Gaussians based on Z
+        valid_depth = Z > near_plane
+    else:
+        Z_lb, Z_ub = compute_bound_Z(pose_lb, pose_ub, cam_const, scale, world_frame)
+        assert (Z_lb <= Z_ub).all(), "Z_lb should be less than or equal to Z_ub for all Gaussians"
+
+        XZ_lb, XZ_ub = compute_bound_XZ(pose_lb, pose_ub, cam_const, scale, world_frame)
+        YZ_lb, YZ_ub = compute_bound_YZ(pose_lb, pose_ub, cam_const, scale, world_frame)
+        px_lb, px_ub = fx * XZ_lb + cx, fx * XZ_ub + cx
+        py_lb, py_ub = fy * YZ_lb + cy, fy * YZ_ub + cy
+
+        assert (px_lb <= px_ub).all(), "px_lb should be less than or equal to px_ub for all Gaussians"
+        assert (py_lb <= py_ub).all(), "py_lb should be less than or equal to py_ub for all Gaussians"
+
+        # Filter valid Gaussians based on Z_lb
+        valid_depth = Z_lb > near_plane
     valid_idx = torch.where(valid_depth)[0]
     N_valid = valid_idx.numel()
     print(f"Total Gaussians: {N}, Valid Gaussians: {N_valid}")
@@ -694,7 +646,7 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     if N_valid == 0:
         print("⚠️  No valid Gaussians!")
         rgb = torch.zeros(height, width, 3, device=device, dtype=dtype)
-        return rgb
+        return rgb, rgb, rgb
 
     quats = quats[valid_idx]
     scales = scales[valid_idx]
@@ -702,8 +654,19 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     colors = colors[valid_idx]
     means_cam = means_cam[valid_idx]  # (N_valid, 3)
 
+    X = X[valid_idx]
+    Y = Y[valid_idx]
+    Z = Z[valid_idx]
+    XZ = XZ[valid_idx]
+    YZ = YZ[valid_idx]
+    px = px[valid_idx]
+    py = py[valid_idx]
     Z_lb = Z_lb[valid_idx]
     Z_ub = Z_ub[valid_idx]
+    px_lb = px_lb[valid_idx]
+    px_ub = px_ub[valid_idx]
+    py_lb = py_lb[valid_idx]
+    py_ub = py_ub[valid_idx]
     cam_const = cam_const[valid_idx]
 
     # ============================================================
@@ -711,26 +674,6 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     # ============================================================
     C0 = 0.28209479177387814
     colors_rgb = torch.clamp(C0*colors[:, 0, :] + 0.5, 0.0, 1.0)  # (N_valid, 3)
-
-    # ============================================================
-    # 3. Camera Projection (Vectorized)
-    # ============================================================
-    X = means_cam[:, 0]  # (N_valid,)
-    Y = means_cam[:, 1]  # (N_valid,)
-    Z = means_cam[:, 2]  # (N_valid,)
-
-    XZ=X/Z  # (N_valid,)
-    YZ=Y/Z  # (N_valid,)
-    px = fx * XZ + cx  # (N_valid,)
-    py = fy * YZ + cy  # (N_valid,)
-
-    XZ_lb, XZ_ub = compute_bound_XZ(pose_lb, pose_ub, cam_const, scale)
-    YZ_lb, YZ_ub = compute_bound_YZ(pose_lb, pose_ub, cam_const, scale)
-    px_lb, px_ub = fx * XZ_lb + cx, fx * XZ_ub + cx
-    py_lb, py_ub = fy * YZ_lb + cy, fy * YZ_ub + cy
-
-    assert (px_lb <= px_ub).all(), "px_lb should be less than or equal to px_ub for all Gaussians"
-    assert (py_lb <= py_ub).all(), "py_lb should be less than or equal to py_ub for all Gaussians"
 
     # ============================================================
     # 4. Compute Radius for each 2D Gaussian (Vectorized)
@@ -741,8 +684,11 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     gs_const = trans_R.T[None, ...]@R@S  # (N_valid, 3, 3)
     adj_gs_const_T = trans_R.T[None, ...]@R@adj_S.transpose(-1, -2)  # (N_valid, 3, 3)
 
-    radius = compute_bound_radius(pose_lb, pose_ub, Z_lb, Z_ub, fx, fy, cam_const, gs_const, scale)  # (N_valid,)
-    radius = COEFF_RADIUS*torch.sqrt(radius)  # (N_valid,)
+    if debug:
+        radius = compute_radius(pose, Z, fx, fy, cam_const, gs_const, scale, world_frame)  # (N_valid,)
+    else:
+        radius = compute_bound_radius(pose_lb, pose_ub, Z_lb, Z_ub, fx, fy, cam_const, gs_const, scale, world_frame)  # (N_valid,)
+    radius = COEFF_RADIUS*radius  # (N_valid,)
     radius = torch.clamp(radius, min=MIN_RADIUS, max=MAX_RADIUS) # (N_valid,)
 
     # ============================================================
@@ -781,8 +727,8 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
     rgb_lb = torch.zeros(height, width, 3, device=device, dtype=torch.float32) # (height, width, 3)
     rgb_ub = torch.zeros(height, width, 3, device=device, dtype=torch.float32) # (height, width, 3)
 
-    tiles_x = (width + TILE - 1) // TILE
-    tiles_y = (height + TILE - 1) // TILE
+    tiles_x = (width + tile - 1) // tile
+    tiles_y = (height + tile - 1) // tile
     total = tiles_y * tiles_x
     # ============================================================
     # 8. Tile-Based Rasterization
@@ -792,8 +738,8 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
         ty = i // tiles_x
         tx = i % tiles_x
 
-        x0, y0 = tx * TILE, ty * TILE
-        x1, y1 = min(x0 + TILE, width), min(y0 + TILE, height)
+        x0, y0 = tx * tile, ty * tile
+        x1, y1 = min(x0 + tile, width), min(y0 + tile, height)
 
         tile_w = x1 - x0
         tile_h = y1 - y0
@@ -830,37 +776,29 @@ def render_bound(pose_lb, pose_ub, scene, width = 300, height = 200,
         ### Compute Mahalanobis Distance
         mahal = compute_mahal_chunked(pose, flt_Z, dx, dy, 
                                       flt_cam_const, flt_gs_const, flt_adj_gs_const_T, scale, 
-                                      chunk_size)  # (num_valid, tile_h, tile_w)
+                                      chunk_size, world_frame)  # (num_valid, tile_h, tile_w)
         # mahal_lb = torch.clamp(mahal-0.05, min=0.0)  # (num_valid, tile_h, tile_w)
         # mahal_ub = torch.clamp(mahal*3, max=MAX_RADIUS**2)  # (num_valid, tile_h, tile_w)
 
-        # start_time = time()
-        mahal_lb, mahal_ub = compute_bound_mahal_chunked(pose_lb, pose_ub, flt_Z_lb, flt_Z_ub, dx, dy, 
-                                                        flt_cam_const, flt_gs_const, flt_adj_gs_const_T, scale, 
-                                                        chunk_size) # (num_valid, tile_h, tile_w)
-        # end_time = time()
-        # print(f"Mahalanobis bounds computed in {end_time - start_time:.2f} seconds")
-        
-        
         w = torch.exp(-0.5 * mahal) * flt_opacities[:, None, None] # (num_valid, tile_h, tile_w)
-        
-        w_lb = torch.exp(-0.5 * mahal_ub) * flt_opacities[:, None, None] # (num_valid, tile_h, tile_w)
-        w_ub = torch.exp(-0.5 * mahal_lb) * flt_opacities[:, None, None] # (num_valid, tile_h, tile_w)
-
-        w_lb = torch.where(w_lb < 1e-3, torch.zeros_like(w_lb), w_lb)
-        w_ub = torch.where(w_ub > 1-1e-3, torch.ones_like(w_ub), w_ub)
-        w_ub = torch.where((w_ub - w_lb) < 1e-3, w_lb, w_ub)
 
 
         rgb_patch = compute_alpha_blending_chunked(w, flt_colors)  # (num_valid, tile_h, tile_w, 3), (num_valid, tile_h, tile_w)
-        # rgb_patch_lb = rgb_patch_ub = rgb_patch
+        if debug:
+            rgb_patch_lb = rgb_patch_ub = rgb_patch
+        else:
+            mahal_lb, mahal_ub = compute_bound_mahal_chunked(pose_lb, pose_ub, flt_Z_lb, flt_Z_ub, dx, dy, 
+                                                            flt_cam_const, flt_gs_const, flt_adj_gs_const_T, scale, 
+                                                            chunk_size, world_frame) # (num_valid, tile_h, tile_w)
+            
+            w_lb = torch.exp(-0.5 * mahal_ub) * flt_opacities[:, None, None] # (num_valid, tile_h, tile_w)
+            w_ub = torch.exp(-0.5 * mahal_lb) * flt_opacities[:, None, None] # (num_valid, tile_h, tile_w)
 
-        rgb_patch_lb, rgb_patch_ub = compute_interval_bound_alpha_blending_chunked(w_lb, w_ub, flt_colors)  # (tile_h, tile_w, 3)
-        # rgb_patch_lb, rgb_patch_ub = compute_linear_bound_alpha_blending(pose_lb, pose_ub,  flt_Z_lb, flt_Z_ub, 
-        #                                                                 dx, dy, flt_cam_const, flt_gs_const, flt_adj_gs_const_T, scale,
-        #                                                                 w_lb, w_ub,
-        #                                                                 flt_opacities, flt_colors,
-        #                                                                 )  # (tile_h, tile_w, 3)
+            w_lb = torch.where(w_lb < 1e-3, torch.zeros_like(w_lb), w_lb)
+            w_ub = torch.where(w_ub > 1-1e-3, torch.ones_like(w_ub), w_ub)
+            w_ub = torch.where((w_ub - w_lb) < 1e-3, w_lb, w_ub)
+
+            rgb_patch_lb, rgb_patch_ub = compute_interval_bound_alpha_blending_chunked(w_lb, w_ub, flt_colors)  # (tile_h, tile_w, 3)
     
         rgb[y0:y1, x0:x1] = rgb_patch
         rgb_lb[y0:y1, x0:x1] = rgb_patch_lb

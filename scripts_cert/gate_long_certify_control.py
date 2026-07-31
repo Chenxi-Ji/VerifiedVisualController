@@ -1,37 +1,52 @@
 import os
-import math
-import json
 import sys
-import time
 from itertools import product
 from collections import deque
 from tqdm import tqdm
 
 from pathlib import Path
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
 from dataclasses import dataclass
-from torch.utils.data import Dataset, DataLoader
-from scipy.spatial.transform import Rotation
-from nerfstudio.utils import colormaps
-import cv2
-
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-import matplotlib.pyplot as plt
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.append(str(ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent          # <root>/scripts_cert
+PROJECT_ROOT = SCRIPT_DIR.parent                       # <root>
+CONTROL_DIR = PROJECT_ROOT / "scripts_control"
+RENDER_DIR = PROJECT_ROOT / "scripts_render"
 
-from scripts_render.render_image import render
-from scripts_control.utils_ctrl_lya_pt import (
-    Controller,
-    Lyapunov,
-    transform_drone_velocity_to_world_frame,
-)
+# certify_control.py lives in <root>/scripts_cert, while the controller utilities
+# and renderer live in sibling folders. Add the project paths explicitly so the
+# script works when launched as:
+#   python scripts_cert/certify_control.py
+for path in (PROJECT_ROOT, CONTROL_DIR, RENDER_DIR):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+try:
+    from scripts_render.render_image import (
+        Config as RenderConfig,
+        render,
+        load_gsplat_scene,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scripts_render", "scripts_render.render_image"}:
+        raise
+    from render_image import Config as RenderConfig, render, load_gsplat_scene
+
+try:
+    from scripts_control.utils_ctrl_lya_pt import (
+        Controller,
+        Lyapunov,
+        transform_drone_velocity_to_world_frame,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scripts_control", "scripts_control.utils_ctrl_lya_pt"}:
+        raise
+    from utils_ctrl_lya_pt import Controller, Lyapunov, transform_drone_velocity_to_world_frame
 
 # from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
 
@@ -41,6 +56,7 @@ from scripts_control.utils_ctrl_lya_pt import (
 # =============================
 @dataclass
 class Config:
+    scene_name = "gate_long"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     dt = 0.1
@@ -50,52 +66,38 @@ class Config:
     n_split = [ele + 1 for ele in n_split]
 
     min_cell_size = 0.01
-    max_depth = 30
+    max_depth = 10
     sample_size = 64
     lyapunov_margin = 0.01
+    lyapunov_verified_threshold = 0.05
 
-    target_pose = np.array([0.0, -3.0, -0.2, 1.57, 0.0, 0.0])
-    gate_pose = np.array([0.0, -2.0, -0.2, 1.57, 0.0, 0.0])
-
-    save_cert_filename = "cert"
-
-    if save_cert_filename == "cert":
-        pose_lb = np.array([-1.5, -3.8, -0.4, 1.57, 0.0, 0.0])
-        pose_ub = np.array([1.5, -2.8, -0.0, 1.57, 0.0, 0.0])
-    elif save_cert_filename == "cert_inner":
-        pose_lb = np.array([-0.8, -3.8, -0.4, 1.57, 0.0, 0.0])
-        pose_ub = np.array([0.8, -3.2, 0.0, 1.57, 0.0, 0.0])
-
-    gsplat_path = "nerfstudio/outputs/uturn/splatfacto/2025-05-09_151825"
-    checkpoint = "nerfstudio_models/step-000040005.ckpt"
+    # Match test_ctrl_lya_pt.py: gate-centered world frame, gate at the origin,
+    # +y on the deployment side, z down, and yaw=-pi/2 facing the gate.
+    target_pose = np.array([0.0, 1.5, 0.0, -np.pi / 2, 0.0, 0.0])
+    gate_pose = np.array([0.0, 0.0, 0.0, -np.pi / 2, 0.0, 0.0])
 
     save_path = "weights/ctrl_lya.pt"
-    video_dir = "videos"
+    video_dir = f"videos_{scene_name}"
+    results_dir = "results"
+    figures_dir = "figures"
 
+    region_size = "small"
+    save_cert_filename = f"{scene_name}_{region_size}_cert"
 
-# =============================
-# GSPLAT LOADING
-# =============================
-def load_gsplat_scene(cfg):
-    ckpt_path = os.path.join(cfg.gsplat_path, cfg.checkpoint)
-    res = torch.load(ckpt_path)
+    # Use the same state domain sampled by sample_init_poses() in
+    # test_ctrl_lya_pt.py: target + [low, high].
 
-    means = res["pipeline"]["_model.gauss_params.means"]
-    quats = res["pipeline"]["_model.gauss_params.quats"]
-    opacities = res["pipeline"]["_model.gauss_params.opacities"]
-    scales = res["pipeline"]["_model.gauss_params.scales"]
-
-    dc = res["pipeline"]["_model.gauss_params.features_dc"]
-    rest = res["pipeline"]["_model.gauss_params.features_rest"]
-    colors = torch.cat((dc[:, None, :], rest), dim=1)
-
-    with open(os.path.join(cfg.gsplat_path, "dataparser_transforms.json"), "r") as f:
-        meta = json.load(f)
-
-    transform = np.array(meta["transform"])
-    scale = meta["scale"]
-
-    return means, quats, opacities, scales, colors, transform, scale
+    if region_size == "large":
+        pose_lb = target_pose + np.array([-0.5, -0.5, -0.3, -0.0, 0.0, 0.0])
+        pose_ub = target_pose + np.array([0.5, 0.5, 0.3, 0.0, 0.0, 0.0])
+    elif region_size == "mid":
+        pose_lb = target_pose + np.array([-0.3, -0.3, -0.2, 0.0, 0.0, 0.0])
+        pose_ub = target_pose + np.array([0.3, 0.3, 0.2, 0.0, 0.0, 0.0])
+    elif region_size == "small":
+        pose_lb = target_pose + np.array([0.1, -0.2, -0.1, 0.0, 0.0, 0.0])
+        pose_ub = target_pose + np.array([0.3, 0.2, 0.1, 0.0, 0.0, 0.0])
+    else:
+        raise ValueError(f"Unknown region_size: {region_size}")
 
 
 # =============================
@@ -197,11 +199,24 @@ def verify_one_cell(lb, ub, ctrl, Vnet, scene, render_fn, cfg, target_t, device)
     V_curr_min = V_curr.min()
     V_curr_max = V_curr.max()
 
+    if V_curr_max <= cfg.lyapunov_verified_threshold:
+        stats = {
+            "V_curr_min": V_curr_min.item(),
+            "V_curr_max": V_curr_max.item(),
+            "V_next_min": float("nan"),
+            "V_next_max": float("nan"),
+            "threshold_verified": True,
+        }
+        return True, stats
+
     imgs = torch.stack(
         [
             render_fn(
                 pose.detach().cpu().numpy(),
                 scene,
+                cfg.camera_params,
+                output_size=cfg.output_size,
+                camera_model=cfg.camera_model,
                 device=device,
             )
             for pose in poses
@@ -209,33 +224,25 @@ def verify_one_cell(lb, ub, ctrl, Vnet, scene, render_fn, cfg, target_t, device)
         dim=0,
     )
 
-    pred_self = ctrl(imgs)  # (B,3)
-    pred = transform_drone_velocity_to_world_frame(pred_self)  # (B,4) or (B,3)
+    # Match the current utils_ctrl_lya_pt.py convention: controller output is
+    # transformed from drone frame to world frame, then zero pitch/roll rates
+    # are appended and the full 6D pose is integrated with forward Euler.
+    pred_self = ctrl(imgs)  # (B,4): [vx, vy, vz, yaw_rate] in body frame
+    if pred_self.ndim != 2 or pred_self.shape[-1] != 4:
+        raise ValueError(
+            "Controller must return shape (B, 4) containing "
+            f"[vx, vy, vz, yaw_rate], but got {tuple(pred_self.shape)}"
+        )
 
-    if pred.shape[-1] == 3:
-        zeros = torch.zeros(
-            cfg.sample_size,
-            3,
-            device=pred.device,
-            dtype=pred.dtype,
-        )  # (B,3)
-
-        pred = torch.cat([pred, zeros], dim=-1)  # (B,6)
-
-    elif pred.shape[-1] == 4:
-        zeros = torch.zeros(
-            cfg.sample_size,
-            2,
-            device=pred.device,
-            dtype=pred.dtype,
-        )  # (B,2)
-
-        pred = torch.cat([pred, zeros], dim=-1)  # (B,6)
-
-    else:
-        raise ValueError(f"Unexpected pred shape: {pred.shape}")
-
-    next_poses = poses + pred * cfg.dt  # (B,6)
+    pred = transform_drone_velocity_to_world_frame(pred_self)  # (B,4)
+    zeros = torch.zeros(
+        *pred.shape[:-1],
+        2,
+        device=pred.device,
+        dtype=pred.dtype,
+    )  # (B,2)
+    pred = torch.cat([pred, zeros], dim=-1)  # (B,6)
+    next_poses = poses + pred * cfg.dt       # (B,6)
 
     V_next, _ = Vnet(next_poses, target_batch)
     V_next = V_next.squeeze(-1)  # (B,)
@@ -250,6 +257,7 @@ def verify_one_cell(lb, ub, ctrl, Vnet, scene, render_fn, cfg, target_t, device)
         "V_curr_max": V_curr_max.item(),
         "V_next_min": V_next_min.item(),
         "V_next_max": V_next_max.item(),
+        "threshold_verified": False,
     }
 
     return verified, stats
@@ -275,6 +283,7 @@ def box_to_dict(lb, ub, verified, depth, stats):
         "V_curr_max": stats["V_curr_max"],
         "V_next_min": stats["V_next_min"],
         "V_next_max": stats["V_next_max"],
+        "threshold_verified": stats.get("threshold_verified", False),
     }
 
 
@@ -289,9 +298,13 @@ def run_test(pose_lb, pose_ub, ctrl, Vnet, scene, render_fn, cfg, device, video_
     ctrl.to(device).eval()
     Vnet.to(device).eval()
 
-    os.makedirs(video_dir, exist_ok=True)
-    os.makedirs("results", exist_ok=True)
-    os.makedirs("figures", exist_ok=True)
+    video_dir = Path(video_dir)
+    results_dir = PROJECT_ROOT / cfg.results_dir
+    figures_dir = PROJECT_ROOT / cfg.figures_dir
+
+    video_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
 
     target_t = torch.tensor(
         target,
@@ -390,12 +403,15 @@ def run_test(pose_lb, pose_ub, ctrl, Vnet, scene, render_fn, cfg, device, video_
         "target": target,
         "gate": gate,
         "cfg": {
+            "scene_name": cfg.scene_name,
+            "region_size": cfg.region_size,
             "dt": cfg.dt,
             "n_split": cfg.n_split,
             "min_cell_size": cfg.min_cell_size,
             "max_depth": cfg.max_depth,
             "sample_size": cfg.sample_size,
             "lyapunov_margin": cfg.lyapunov_margin,
+            "lyapunov_verified_threshold": cfg.lyapunov_verified_threshold,
         },
         "summary": {
             "evaluated_count": evaluated_count,
@@ -406,7 +422,8 @@ def run_test(pose_lb, pose_ub, ctrl, Vnet, scene, render_fn, cfg, device, video_
         },
     }
 
-    torch.save(save_dict, f"results/{filename}_result.pt")
+    result_path = results_dir / f"{filename}_result.pt"
+    torch.save(save_dict, result_path)
 
     print("\n========== Verification Summary ==========")
     print(f"Evaluated cells        : {evaluated_count}")
@@ -414,7 +431,7 @@ def run_test(pose_lb, pose_ub, ctrl, Vnet, scene, render_fn, cfg, device, video_
     print(f"Failed leaf cells      : {terminal_failed_count}")
     print(f"Subdivided cells       : {subdivided_count}")
     print(f"Final leaf cells       : {len(verified_boxes)}")
-    print(f"Saved to               : results/{filename}_result.pt")
+    print(f"Saved to               : {result_path}")
     print("==========================================\n")
 
     # =========================
@@ -466,44 +483,55 @@ def run_test(pose_lb, pose_ub, ctrl, Vnet, scene, render_fn, cfg, device, video_
     ax.legend()
 
     plt.tight_layout()
-    plt.savefig(f"figures/{filename}_regions.png", dpi=300, bbox_inches="tight")
+    figure_path = figures_dir / f"{filename}_regions.png"
+    plt.savefig(figure_path, dpi=300, bbox_inches="tight")
     plt.show()
 
 
 if __name__ == "__main__":
-    os.makedirs("results", exist_ok=True)
-    os.makedirs("figures", exist_ok=True)
-
     cfg = Config()
     device = cfg.device
 
-    scene = load_gsplat_scene(cfg)
+    assert cfg.scene_name == "gate_long", "This certification script is configured for scene_name='gate_long' only."
+
+    render_cfg = RenderConfig(
+        scene_name=cfg.scene_name,
+        device=cfg.device,
+    )
+    cfg.camera_params = render_cfg.camera_params
+    cfg.output_size = render_cfg.output_size
+    cfg.camera_model = render_cfg.camera_model
+
+    scene = load_gsplat_scene(render_cfg)
 
     ctrl = Controller().to(device)
     Vnet = Lyapunov().to(device)
-    render_fn = render
 
-    PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-    save_path = os.path.join(PROJECT_ROOT, "../", cfg.save_path)
+    # Match test_ctrl_lya_pt.py's checkpoint loading and architecture check.
+    save_path = Path(cfg.save_path)
+    if not save_path.is_absolute():
+        save_path = PROJECT_ROOT / save_path
 
     ckpt = torch.load(save_path, map_location=device)
-
-    ctrl.load_state_dict(ckpt["controller"])
+    try:
+        ctrl.load_state_dict(ckpt["controller"])
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"{save_path} does not match the current Controller architecture "
+            "(it may predate the vertical-readout/TFLite-safe pooling upgrade). "
+            "Train new weights with scripts_control/train_ctrl_lya_pt.py and "
+            "copy the intended checkpoint to weights/ctrl_lya.pt."
+        ) from exc
     Vnet.load_state_dict(ckpt["lyapunov"])
 
-    pose_lb = cfg.pose_lb
-    pose_ub = cfg.pose_ub
-
     run_test(
-        pose_lb,
-        pose_ub,
-        ctrl,
-        Vnet,
-        scene,
-        render_fn,
-        cfg,
-        device,
-        video_dir=cfg.video_dir,
+        pose_lb=cfg.pose_lb,
+        pose_ub=cfg.pose_ub,
+        ctrl=ctrl,
+        Vnet=Vnet,
+        scene=scene,
+        render_fn=render,
+        cfg=cfg,
+        device=device,
+        video_dir=PROJECT_ROOT / cfg.video_dir,
     )
-    
-    

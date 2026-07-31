@@ -1,25 +1,72 @@
 import os
+import argparse
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
+from dataclasses import dataclass
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
 # =========================
+# Config
+# =========================
+@dataclass
+class Config:
+    scene_name: str = "uturn"  # "uturn" or "gate_long"
+    region_size: str = "small"
+    results_dir: str = "results"
+    figures_dir: str = "figures"
+
+    @property
+    def filename(self):
+        return f"{self.scene_name}_{self.region_size}_cert"
+
+    @property
+    def result_filename(self):
+        return os.path.join(self.results_dir, f"{self.filename}_result.pt")
+
+    @property
+    def figure_filename(self):
+        return os.path.join(self.figures_dir, f"{self.filename}_partition_and_verification.png")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Plot certification result for uturn or gate_long.")
+    parser.add_argument(
+        "--scene",
+        choices=["uturn", "gate_long"],
+        default="uturn",
+        help="Scene name to plot.",
+    )
+    parser.add_argument(
+        "--region",
+        default="small",
+        help="Region size tag used in the result filename.",
+    )
+    return parser.parse_args()
+
+
+# =========================
 # Load data
 # =========================
-filename = "cert"
-result_filename = f"results/{filename}_result.pt"
-data = torch.load(result_filename, map_location="cpu")
+args = parse_args()
+cfg = Config(scene_name=args.scene, region_size=args.region)
+
+data = torch.load(cfg.result_filename, map_location="cpu")
 
 verified_boxes = data["verified_boxes"]
 target = np.asarray(data["target"][:3])
 gate = np.asarray(data["gate"][:3])
 
-os.makedirs("figures", exist_ok=True)
+os.makedirs(cfg.figures_dir, exist_ok=True)
+
+print(f"Loaded result from: {cfg.result_filename}")
+print(f"Scene             : {cfg.scene_name}")
+print(f"Region            : {cfg.region_size}")
+print(f"Total boxes       : {len(verified_boxes)}")
 
 
 # =========================
@@ -120,11 +167,18 @@ cell_sizes = np.asarray(
     [get_box_max_size(box) for box in verified_boxes],
     dtype=np.float64,
 )
+cell_sizes = np.round(cell_sizes / 1e-5) * 1e-5
 
-size_norm = Normalize(
-    vmin=cell_sizes.min(),
-    vmax=cell_sizes.max(),
-)
+if np.isclose(cell_sizes.min(), cell_sizes.max()):
+    size_norm = Normalize(
+        vmin=cell_sizes.min() - 1e-12,
+        vmax=cell_sizes.max() + 1e-12,
+    )
+else:
+    size_norm = Normalize(
+        vmin=cell_sizes.min(),
+        vmax=cell_sizes.max(),
+    )
 
 size_cmap = cm.get_cmap("viridis")
 
@@ -167,7 +221,7 @@ setup_axis(
     x_lim,
     y_lim,
     z_lim,
-    title="Pose Cell Partition: Colored by Cell Size",
+    title=f"{cfg.scene_name}: Pose Cell Partition Colored by Cell Size",
 )
 
 ax_size.legend()
@@ -178,7 +232,12 @@ ax_size.legend()
 # color by verified / unverified
 # =========================
 for box in verified_boxes:
-    color = "green" if box["verified"] else "red"
+    if not box["verified"]:
+        color = "red"
+    elif box.get("threshold_verified", False):
+        color = "lightgreen"
+    else:
+        color = "darkgreen"
 
     draw_box(
         ax_verify,
@@ -194,6 +253,9 @@ for box in verified_boxes:
         linewidth=0.2,
     )
 
+ax_verify.scatter([], [], [], c="darkgreen", s=70, marker="s", label="Verified: V decreases")
+ax_verify.scatter([], [], [], c="lightgreen", s=70, marker="s", label="Verified: V <= threshold")
+ax_verify.scatter([], [], [], c="red", s=70, marker="s", label="Failed")
 ax_verify.scatter(*target, c="red", s=70, marker="*", label="Target")
 ax_verify.scatter(*gate, c="black", s=70, marker="*", label="Gate")
 
@@ -202,7 +264,7 @@ setup_axis(
     x_lim,
     y_lim,
     z_lim,
-    title="Pose Cell Verification: Green=Verified, Red=Failed",
+    title=f"{cfg.scene_name}: Verification Reason",
 )
 
 ax_verify.legend()
@@ -233,7 +295,8 @@ cbar.set_label("max(dx, dy, dz)")
 # =========================
 plt.tight_layout()
 
-save_path = f"figures/{filename}_partition_and_verification.png"
-plt.savefig(save_path, dpi=300, bbox_inches="tight")
+plt.savefig(cfg.figure_filename, dpi=300, bbox_inches="tight")
+
+print(f"Saved figure to: {cfg.figure_filename}")
 
 plt.show()
